@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="theme-color" content="#F2EAD8" />
+  <meta name="theme-color" content="#FBEDF1" />
   <title>A small ledger of becoming</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    html, body { background: #F2EAD8; }
+    html, body { background: #FBEDF1; }
     body {
       font-family: 'Manrope', system-ui, sans-serif;
       -webkit-tap-highlight-color: transparent;
@@ -272,18 +272,18 @@
 
 
 const palette = {
-  bg: "#F2EAD8",
-  surface: "#FAF5E9",
-  surfaceDeep: "#EBDFC4",
-  ink: "#1F1A14",
-  inkSoft: "#4A3F30",
-  inkMuted: "#857664",
-  accent: "#A0432A",
-  accentSoft: "#C25A38",
-  amber: "#C4904D",
-  forest: "#5C6E47",
-  border: "#D9CDB5",
-  borderSoft: "#E5DBC4",
+  bg: "#FBEDF1",
+  surface: "#FFF5F8",
+  surfaceDeep: "#F5DDE5",
+  ink: "#3D2638",
+  inkSoft: "#664756",
+  inkMuted: "#9B7989",
+  accent: "#D85F87",
+  accentSoft: "#E68DA8",
+  amber: "#ECCB6B",
+  forest: "#6FA17B",
+  border: "#E8C9D5",
+  borderSoft: "#F0DBE3",
 };
 
 const fonts = {
@@ -430,14 +430,14 @@ const computeEffectiveProgress = (goal) => {
 };
 
 const HABIT_COLORS = [
-  "#A0432A",
-  "#5C6E47",
-  "#6B4868",
-  "#4A6378",
-  "#8B5A3C",
-  "#7A7A3D",
-  "#2D5F5F",
-  "#C4904D",
+  "#E07A9E",
+  "#A693D6",
+  "#F39A88",
+  "#7AB8DB",
+  "#7BC9A0",
+  "#E8C566",
+  "#D283C2",
+  "#F5A78A",
 ];
 
 const getHabitColor = (goalId, allGoals) => {
@@ -3678,7 +3678,7 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
         return (
           <div
             className="min-h-screen flex items-center justify-center"
-            style={{ background: "#F2EAD8", color: "#857664",
+            style={{ background: "#FBEDF1", color: "#9B7989",
                      fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", fontSize: 24 }}
           >
             opening your journal…
@@ -3690,13 +3690,13 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
         return (
           <div
             className="min-h-screen flex items-center justify-center px-6 text-center"
-            style={{ background: "#F2EAD8", color: "#1F1A14" }}
+            style={{ background: "#FBEDF1", color: "#3D2638" }}
           >
             <div>
               <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600, fontSize: 32, marginBottom: 8 }}>
                 Moving your habits to the cloud…
               </div>
-              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", color: "#857664" }}>
+              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", color: "#9B7989" }}>
                 One moment. This only happens once.
               </div>
             </div>
@@ -3727,22 +3727,22 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
           {open ? (
             <div
               className="rounded-2xl px-4 py-3 flex items-center gap-3 text-sm shadow-lg"
-              style={{ background: "#FAF5E9", border: "1px solid #D9CDB5", color: "#1F1A14" }}
+              style={{ background: "#FFF5F8", border: "1px solid #E8C9D5", color: "#3D2638" }}
             >
-              <div className="truncate max-w-[180px]" style={{ color: "#4A3F30" }}>
+              <div className="truncate max-w-[180px]" style={{ color: "#664756" }}>
                 {email}
               </div>
               <button
                 onClick={signOut}
                 className="px-3 py-1 rounded-full text-xs"
-                style={{ background: "#A0432A", color: "#F2EAD8" }}
+                style={{ background: "#D85F87", color: "#FFF5F8" }}
               >
                 Sign out
               </button>
               <button
                 onClick={() => setOpen(false)}
                 className="text-xs"
-                style={{ color: "#857664" }}
+                style={{ color: "#9B7989" }}
                 aria-label="Close"
               >
                 ✕
@@ -3752,7 +3752,7 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
             <button
               onClick={() => setOpen(true)}
               className="w-9 h-9 rounded-full flex items-center justify-center text-sm shadow-md"
-              style={{ background: "#FAF5E9", border: "1px solid #D9CDB5", color: "#4A3F30" }}
+              style={{ background: "#FFF5F8", border: "1px solid #E8C9D5", color: "#664756" }}
               aria-label="Account"
               title="Account"
             >
