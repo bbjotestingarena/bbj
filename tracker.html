@@ -1,0 +1,3771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#F2EAD8" />
+  <title>A small ledger of becoming</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { background: #F2EAD8; }
+    body {
+      font-family: 'Manrope', system-ui, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    /* Make the native date picker icon visible on the cream background */
+    input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.45) sepia(0.45) saturate(2) hue-rotate(335deg);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script>
+    /* ── Supabase config ───────────────────────────────────────────────── */
+    const SUPABASE_URL = "https://oubfzwqbcjainmeefqpb.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_jr6gAFb0h-7s922GWpYlHQ_eA1XKDgk";
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true },
+    });
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect } = React;
+
+    /* ── Storage shim: window.storage API backed by Supabase ─────────────
+       Existing app code reads/writes one blob at key "goals-data".
+       We translate that blob to/from normalized Supabase tables on the fly,
+       so no other app code needs to change. ──────────────────────────── */
+
+    const blobToRows = (blob, userId) => {
+      const habits = [];
+      const milestones = [];
+      const checkIns = [];
+      const resets = [];
+      for (const g of blob.goals || []) {
+        habits.push({
+          id: g.id,
+          user_id: userId,
+          name: g.name,
+          description: g.description || null,
+          created_at: g.createdAt,
+          attempt_start: g.attemptStart || g.createdAt,
+          miss_rate_threshold: g.missRateThreshold ?? 0.30,
+        });
+        for (const m of g.milestones || []) {
+          milestones.push({
+            id: m.id,
+            habit_id: g.id,
+            user_id: userId,
+            day: m.day,
+            reward: m.reward,
+            claimed: !!m.claimed,
+            claimed_at: m.claimedAt || null,
+          });
+        }
+        for (const d of g.checkIns || []) {
+          checkIns.push({ habit_id: g.id, user_id: userId, date: d });
+        }
+        for (const r of g.attemptResets || []) {
+          resets.push({
+            habit_id: g.id,
+            user_id: userId,
+            date: r.date,
+            previous_start: r.previousStart,
+            elapsed_days: r.elapsedDays,
+            completed_days: r.completedDays,
+            missed_days: r.missedDays,
+            miss_rate: r.missRate,
+            threshold: r.threshold ?? 0.30,
+          });
+        }
+      }
+      return { habits, milestones, checkIns, resets };
+    };
+
+    const rowsToBlob = ({ habits, milestones, checkIns, resets }) => {
+      const byHabit = new Map();
+      for (const h of habits) {
+        byHabit.set(h.id, {
+          id: h.id,
+          name: h.name,
+          description: h.description || "",
+          createdAt: h.created_at,
+          attemptStart: h.attempt_start,
+          missRateThreshold: Number(h.miss_rate_threshold),
+          milestones: [],
+          checkIns: [],
+          attemptResets: [],
+        });
+      }
+      for (const m of milestones) {
+        const g = byHabit.get(m.habit_id);
+        if (!g) continue;
+        g.milestones.push({
+          id: m.id,
+          day: m.day,
+          reward: m.reward,
+          claimed: !!m.claimed,
+          claimedAt: m.claimed_at,
+        });
+      }
+      for (const c of checkIns) {
+        const g = byHabit.get(c.habit_id);
+        if (!g) continue;
+        g.checkIns.push(c.date);
+      }
+      for (const r of resets) {
+        const g = byHabit.get(r.habit_id);
+        if (!g) continue;
+        g.attemptResets.push({
+          date: r.date,
+          previousStart: r.previous_start,
+          elapsedDays: r.elapsed_days,
+          completedDays: r.completed_days,
+          missedDays: r.missed_days,
+          missRate: Number(r.miss_rate),
+          threshold: Number(r.threshold),
+        });
+      }
+      return { goals: Array.from(byHabit.values()) };
+    };
+
+    const fetchAllRows = async (userId) => {
+      const [h, m, c, r] = await Promise.all([
+        supabaseClient.from("habits").select("*").eq("user_id", userId),
+        supabaseClient.from("milestones").select("*").eq("user_id", userId),
+        supabaseClient.from("check_ins").select("*").eq("user_id", userId),
+        supabaseClient.from("attempt_resets").select("*").eq("user_id", userId),
+      ]);
+      if (h.error) throw h.error;
+      if (m.error) throw m.error;
+      if (c.error) throw c.error;
+      if (r.error) throw r.error;
+      return {
+        habits: h.data || [],
+        milestones: m.data || [],
+        checkIns: c.data || [],
+        resets: r.data || [],
+      };
+    };
+
+    /* Whole-blob replace strategy: when the app calls storage.set, we wipe
+       the user's tables and re-insert. Simple, correct, and matches how the
+       app already thinks about the data (one blob). On a habit tracker with
+       a few habits and a few hundred check-ins this is well under 100ms. */
+    const replaceAllRows = async (userId, blob) => {
+      const { habits, milestones, checkIns, resets } = blobToRows(blob, userId);
+
+      // Delete in dependency-safe order (children first)
+      const dels = await Promise.all([
+        supabaseClient.from("attempt_resets").delete().eq("user_id", userId),
+        supabaseClient.from("check_ins").delete().eq("user_id", userId),
+        supabaseClient.from("milestones").delete().eq("user_id", userId),
+      ]);
+      for (const d of dels) if (d.error) throw d.error;
+      const habitDel = await supabaseClient.from("habits").delete().eq("user_id", userId);
+      if (habitDel.error) throw habitDel.error;
+
+      // Insert in dependency-safe order (parents first)
+      if (habits.length) {
+        const { error } = await supabaseClient.from("habits").insert(habits);
+        if (error) throw error;
+      }
+      if (milestones.length) {
+        const { error } = await supabaseClient.from("milestones").insert(milestones);
+        if (error) throw error;
+      }
+      if (checkIns.length) {
+        const { error } = await supabaseClient.from("check_ins").insert(checkIns);
+        if (error) throw error;
+      }
+      if (resets.length) {
+        const { error } = await supabaseClient.from("attempt_resets").insert(resets);
+        if (error) throw error;
+      }
+    };
+
+    const getCurrentUserId = async () => {
+      const { data } = await supabaseClient.auth.getSession();
+      return data.session?.user?.id || null;
+    };
+
+    window.storage = {
+      async get(key) {
+        if (key !== "goals-data") return null;
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        const rows = await fetchAllRows(userId);
+        const blob = rowsToBlob(rows);
+        return { key, value: JSON.stringify(blob), shared: false };
+      },
+      async set(key, value) {
+        if (key !== "goals-data") return null;
+        const userId = await getCurrentUserId();
+        if (!userId) throw new Error("Not signed in");
+        const blob = JSON.parse(value);
+        await replaceAllRows(userId, blob);
+        // Local cache as backup so app doesn't refetch on every save
+        try { localStorage.setItem("goals-data-cache", value); } catch (e) {}
+        return { key, value, shared: false };
+      },
+      async delete(key) {
+        if (key !== "goals-data") return null;
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        await replaceAllRows(userId, { goals: [] });
+        try { localStorage.removeItem("goals-data-cache"); } catch (e) {}
+        return { key, deleted: true, shared: false };
+      },
+      async list() {
+        return { keys: ["goals-data"], prefix: "", shared: false };
+      },
+    };
+
+    /* ── Inlined Lucide icons (matching lucide-react component API) ─────── */
+    const makeIcon = (paths) => ({ size = 24, strokeWidth = 2, style, className, ...rest }) => (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={style}
+        className={className}
+        dangerouslySetInnerHTML={{ __html: paths }}
+        {...rest}
+      />
+    );
+
+    const Plus         = makeIcon('<path d="M5 12h14"/><path d="M12 5v14"/>');
+    const Check        = makeIcon('<path d="M20 6 9 17l-5-5"/>');
+    const ChevronLeft  = makeIcon('<path d="m15 18-6-6 6-6"/>');
+    const ChevronRight = makeIcon('<path d="m9 18 6-6-6-6"/>');
+    const Gift         = makeIcon('<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/>');
+    const Flame        = makeIcon('<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>');
+    const Trash2       = makeIcon('<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>');
+    const Lock         = makeIcon('<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+    const Sparkles     = makeIcon('<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>');
+    const Trophy       = makeIcon('<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>');
+    const X            = makeIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>');
+    const CheckCircle2 = makeIcon('<path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/>');
+    const Circle       = makeIcon('<circle cx="12" cy="12" r="10"/>');
+    const Target       = makeIcon('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>');
+    const CalendarDays = makeIcon('<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>');
+    const RotateCcw    = makeIcon('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>');
+    const Settings2    = makeIcon('<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>');
+
+    /* ── App code (unchanged from goal_tracker.jsx) ──────────────────────── */
+
+
+const palette = {
+  bg: "#F2EAD8",
+  surface: "#FAF5E9",
+  surfaceDeep: "#EBDFC4",
+  ink: "#1F1A14",
+  inkSoft: "#4A3F30",
+  inkMuted: "#857664",
+  accent: "#A0432A",
+  accentSoft: "#C25A38",
+  amber: "#C4904D",
+  forest: "#5C6E47",
+  border: "#D9CDB5",
+  borderSoft: "#E5DBC4",
+};
+
+const fonts = {
+  display: "'Fraunces', Georgia, serif",
+  body: "'Manrope', system-ui, sans-serif",
+};
+
+const RESET_MIN_DAYS = 5;
+const RESET_MISS_RATE = 0.30;
+
+const todayStrPure = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+const computeAttemptStats = (goal, today) => {
+  const attemptStart = goal.attemptStart || goal.createdAt;
+  const startDate = new Date(attemptStart + "T00:00:00");
+  const todayDate = new Date(today + "T00:00:00");
+  const elapsedDays = Math.max(
+    1,
+    Math.floor((todayDate - startDate) / 86400000) + 1
+  );
+  const completedDays = (goal.checkIns || []).filter((d) => d >= attemptStart).length;
+  const missedDays = Math.max(0, elapsedDays - completedDays);
+  const missRate = elapsedDays > 0 ? missedDays / elapsedDays : 0;
+  return { attemptStart, elapsedDays, completedDays, missedDays, missRate };
+};
+
+const computeReset = (goal, today) => {
+  // Replays the habit's entire timeline from createdAt to today, recomputing every
+  // reset event as if the current check-ins and claim dates were always the truth.
+  // This means adding a forgotten check-in (or removing a wrongly-marked one) flows
+  // through the whole history — old resets can be erased, new ones can appear,
+  // and the current attemptStart adjusts to whatever the math actually says.
+  const threshold = goal.missRateThreshold ?? RESET_MISS_RATE;
+  const checkInsSet = new Set(goal.checkIns || []);
+  const claimDates = new Set(
+    (goal.milestones || [])
+      .filter((m) => m.claimed && m.claimedAt)
+      .map((m) => m.claimedAt)
+  );
+
+  const formatDate = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  const createdAt = goal.createdAt || today;
+  const startD = new Date(createdAt + "T00:00:00");
+  const endD = new Date(today + "T00:00:00");
+
+  let attemptStart = createdAt;
+  const newResets = [];
+
+  // Future-start habit: nothing to replay yet
+  if (endD < startD) {
+    if (
+      attemptStart === (goal.attemptStart || createdAt) &&
+      (goal.attemptResets || []).length === 0
+    ) {
+      return null;
+    }
+    return { ...goal, attemptStart, attemptResets: [] };
+  }
+
+  let dayIndex = 0;
+  let attemptStartIndex = 0;
+  let totalCheckIns = 0;
+  let attemptStartCheckIns = 0;
+
+  for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+    const dStr = formatDate(d);
+
+    // Claims advance attemptStart at the start of the day.
+    // (Claiming a milestone on day X starts the next attempt from day X.)
+    if (claimDates.has(dStr)) {
+      attemptStart = dStr;
+      attemptStartIndex = dayIndex;
+      attemptStartCheckIns = totalCheckIns;
+    }
+
+    if (checkInsSet.has(dStr)) {
+      totalCheckIns++;
+    }
+
+    // Evaluate the reset rule using state at the end of this day.
+    const elapsedDays = dayIndex - attemptStartIndex + 1;
+    if (elapsedDays >= RESET_MIN_DAYS) {
+      const completed = totalCheckIns - attemptStartCheckIns;
+      if (completed > 0) {
+        const missed = elapsedDays - completed;
+        const missRate = missed / elapsedDays;
+        if (missRate > threshold) {
+          newResets.push({
+            date: dStr,
+            previousStart: attemptStart,
+            elapsedDays,
+            completedDays: completed,
+            missedDays: missed,
+            missRate,
+            threshold,
+          });
+          attemptStart = dStr;
+          attemptStartIndex = dayIndex;
+          // If today had a check-in, it counts as day 1 of the new attempt
+          // (not double-counted into the failed one only).
+          attemptStartCheckIns =
+            totalCheckIns - (checkInsSet.has(dStr) ? 1 : 0);
+        }
+      }
+    }
+
+    dayIndex++;
+  }
+
+  // Skip the write if nothing changed.
+  const currentStart = goal.attemptStart || createdAt;
+  const currentResets = goal.attemptResets || [];
+  const sameResets =
+    newResets.length === currentResets.length &&
+    newResets.every((r, i) => r.date === currentResets[i].date);
+  if (attemptStart === currentStart && sameResets) {
+    return null;
+  }
+
+  return { ...goal, attemptStart, attemptResets: newResets };
+};
+
+const computeEffectiveProgress = (goal) => {
+  const attemptStart = goal.attemptStart || goal.createdAt;
+  const baseline = (goal.milestones || [])
+    .filter((m) => m.claimed)
+    .reduce((max, m) => Math.max(max, m.day), 0);
+  const attemptCheckIns = (goal.checkIns || []).filter(
+    (d) => d >= attemptStart
+  ).length;
+  return baseline + attemptCheckIns;
+};
+
+const HABIT_COLORS = [
+  "#A0432A",
+  "#5C6E47",
+  "#6B4868",
+  "#4A6378",
+  "#8B5A3C",
+  "#7A7A3D",
+  "#2D5F5F",
+  "#C4904D",
+];
+
+const getHabitColor = (goalId, allGoals) => {
+  if (!allGoals || allGoals.length === 0) return HABIT_COLORS[0];
+  const idx = allGoals.findIndex((g) => g.id === goalId);
+  return HABIT_COLORS[(idx < 0 ? 0 : idx) % HABIT_COLORS.length];
+};
+
+const addDays = (dateStr, n) => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${day}`;
+};
+
+const getMilestoneEvents = (goals, today) => {
+  const events = [];
+  for (const g of goals || []) {
+    for (const m of g.milestones || []) {
+      if (m.claimed && m.claimedAt) {
+        events.push({ date: m.claimedAt, milestone: m, type: "earned", habit: g });
+      }
+    }
+    const progress = computeEffectiveProgress(g);
+    for (const m of g.milestones || []) {
+      if (m.claimed) continue;
+      if (progress >= m.day) continue;
+      const daysAway = m.day - progress;
+      const projDate = addDays(today, daysAway);
+      events.push({ date: projDate, milestone: m, type: "projected", habit: g });
+    }
+  }
+  return events;
+};
+
+const indexEventsByDate = (events) => {
+  const idx = {};
+  for (const e of events) {
+    if (!idx[e.date]) idx[e.date] = [];
+    idx[e.date].push(e);
+  }
+  return idx;
+};
+
+function GoalTracker() {
+  const [goals, setGoals] = useState([]);
+  const [view, setView] = useState("list");
+  const [selectedGoalId, setSelectedGoalId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [celebration, setCelebration] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await window.storage.get("goals-data");
+        if (result && result.value) {
+          const data = JSON.parse(result.value);
+          const loaded = data.goals || [];
+          const today = todayStrPure();
+          const evaluated = loaded.map((g) => computeReset(g, today) || g);
+          setGoals(evaluated);
+          // If any reset triggered while we were away, persist it
+          if (evaluated.some((g, i) => g !== loaded[i])) {
+            try {
+              await window.storage.set(
+                "goals-data",
+                JSON.stringify({ goals: evaluated })
+              );
+            } catch (e) {
+              // ignore
+            }
+          }
+        }
+      } catch (e) {
+        // First run — no data yet
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const saveGoals = async (newGoals) => {
+    const today = todayStrPure();
+    const evaluated = newGoals.map((g) => computeReset(g, today) || g);
+    setGoals(evaluated);
+    try {
+      await window.storage.set("goals-data", JSON.stringify({ goals: evaluated }));
+    } catch (e) {
+      console.error("Save failed", e);
+    }
+  };
+
+  const todayStr = () => todayStrPure();
+
+  const getProgress = (goal) => computeEffectiveProgress(goal);
+  const getAttemptStats = (goal) => computeAttemptStats(goal, todayStr());
+  const isCheckedInToday = (goal) => goal.checkIns?.includes(todayStr());
+
+  const getStreak = (goal) => {
+    if (!goal.checkIns || goal.checkIns.length === 0) return 0;
+    const set = new Set(goal.checkIns);
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    let streak = 0;
+    const todayS = todayStr();
+    if (!set.has(todayS)) {
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    while (true) {
+      const y = cursor.getFullYear();
+      const m = String(cursor.getMonth() + 1).padStart(2, "0");
+      const day = String(cursor.getDate()).padStart(2, "0");
+      const s = `${y}-${m}-${day}`;
+      if (set.has(s)) {
+        streak++;
+        cursor.setDate(cursor.getDate() - 1);
+      } else break;
+    }
+    return streak;
+  };
+
+  const getSortedMilestones = (goal) =>
+    [...(goal.milestones || [])].sort((a, b) => a.day - b.day);
+
+  const getNextMilestone = (goal) => {
+    const progress = getProgress(goal);
+    return getSortedMilestones(goal).find((m) => m.day > progress);
+  };
+
+  const getReadyMilestones = (goal) => {
+    const progress = getProgress(goal);
+    return (goal.milestones || []).filter((m) => m.day <= progress && !m.claimed);
+  };
+
+  const handleCheckIn = async (goalId) => {
+    const goal = goals.find((g) => g.id === goalId);
+    if (!goal || isCheckedInToday(goal)) return;
+    const newGoals = goals.map((g) =>
+      g.id !== goalId ? g : { ...g, checkIns: [...(g.checkIns || []), todayStr()] }
+    );
+    await saveGoals(newGoals);
+    const updated = newGoals.find((g) => g.id === goalId);
+    const newProgress = computeEffectiveProgress(updated);
+    const justHit = (updated.milestones || []).find(
+      (m) => m.day === newProgress && !m.claimed
+    );
+    if (justHit) {
+      setCelebration({
+        goalName: updated.name,
+        reward: justHit.reward,
+        goalId: updated.id,
+        milestoneId: justHit.id,
+      });
+    }
+  };
+
+  const handleUndoCheckIn = async (goalId) => {
+    const newGoals = goals.map((g) =>
+      g.id !== goalId
+        ? g
+        : { ...g, checkIns: (g.checkIns || []).filter((d) => d !== todayStr()) }
+    );
+    await saveGoals(newGoals);
+  };
+
+  const handleToggleDay = async (goalId, dateStr) => {
+    const goal = goals.find((g) => g.id === goalId);
+    if (!goal) return;
+    const checkIns = goal.checkIns || [];
+    const has = checkIns.includes(dateStr);
+    const newCheckIns = has
+      ? checkIns.filter((d) => d !== dateStr)
+      : [...checkIns, dateStr];
+    const newGoals = goals.map((g) =>
+      g.id !== goalId ? g : { ...g, checkIns: newCheckIns }
+    );
+    await saveGoals(newGoals);
+
+    // Only celebrate if we ADDED a check-in and it just hit a milestone
+    if (!has) {
+      const updated = newGoals.find((g) => g.id === goalId);
+      const newProgress = computeEffectiveProgress(updated);
+      const justHit = (updated.milestones || []).find(
+        (m) => m.day === newProgress && !m.claimed
+      );
+      if (justHit) {
+        setCelebration({
+          goalName: updated.name,
+          reward: justHit.reward,
+          goalId: updated.id,
+          milestoneId: justHit.id,
+        });
+      }
+    }
+  };
+
+  const handleClaimReward = async (goalId, milestoneId) => {
+    const today = todayStr();
+    const newGoals = goals.map((g) =>
+      g.id !== goalId
+        ? g
+        : {
+            ...g,
+            attemptStart: today,
+            milestones: g.milestones.map((m) =>
+              m.id === milestoneId
+                ? { ...m, claimed: true, claimedAt: today }
+                : m
+            ),
+          }
+    );
+    await saveGoals(newGoals);
+  };
+
+  const handleAddMilestone = async (goalId, milestone) => {
+    const newGoals = goals.map((g) =>
+      g.id !== goalId
+        ? g
+        : {
+            ...g,
+            milestones: [...(g.milestones || []), milestone].sort(
+              (a, b) => a.day - b.day
+            ),
+          }
+    );
+    await saveGoals(newGoals);
+  };
+
+  const handleDeleteMilestone = async (goalId, milestoneId) => {
+    const newGoals = goals.map((g) =>
+      g.id !== goalId
+        ? g
+        : {
+            ...g,
+            milestones: (g.milestones || []).filter((m) => m.id !== milestoneId),
+          }
+    );
+    await saveGoals(newGoals);
+  };
+
+  const handleUpdateThreshold = async (goalId, threshold) => {
+    const newGoals = goals.map((g) =>
+      g.id !== goalId ? g : { ...g, missRateThreshold: threshold }
+    );
+    await saveGoals(newGoals);
+  };
+
+  const handleCreateGoal = async (goalData) => {
+    const today = todayStr();
+    const startDate = goalData.startDate || today;
+    const { startDate: _ignored, ...rest } = goalData;
+    const newGoal = {
+      id: `goal_${Date.now()}`,
+      ...rest,
+      createdAt: startDate,
+      attemptStart: startDate,
+      checkIns: [],
+      attemptResets: [],
+    };
+    await saveGoals([...goals, newGoal]);
+    setSelectedGoalId(newGoal.id);
+    setView("detail");
+  };
+
+  const handleDeleteGoal = async (goalId) => {
+    await saveGoals(goals.filter((g) => g.id !== goalId));
+    setView("list");
+    setSelectedGoalId(null);
+  };
+
+  const selectedGoal = goals.find((g) => g.id === selectedGoalId);
+
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{
+        background: palette.bg,
+        color: palette.ink,
+        fontFamily: fonts.body,
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap');
+        .grain::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          opacity: 0.35;
+          mix-blend-mode: multiply;
+          background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0.12 0 0 0 0 0.10 0 0 0 0 0.08 0 0 0 0.18 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+        }
+        .ticker { font-variant-numeric: tabular-nums; }
+        .display-italic { font-family: ${fonts.display}; font-style: italic; font-weight: 500; }
+        .display { font-family: ${fonts.display}; font-weight: 600; letter-spacing: -0.02em; }
+        button { font-family: ${fonts.body}; }
+        input, textarea, select { font-family: ${fonts.body}; }
+        .fade-in { animation: fadeIn 0.4s ease-out both; }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .pop { animation: pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+        @keyframes pop {
+          0% { opacity: 0; transform: scale(0.85); }
+          100% { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
+
+      <div className="relative grain max-w-3xl mx-auto px-6 py-10 md:py-14">
+        {loading ? (
+          <div
+            className="text-center py-20 display-italic text-2xl"
+            style={{ color: palette.inkMuted }}
+          >
+            opening your journal…
+          </div>
+        ) : view === "list" ? (
+          <ListView
+            goals={goals}
+            onSelect={(id) => {
+              setSelectedGoalId(id);
+              setView("detail");
+            }}
+            onCreate={() => setView("create")}
+            onOpenCalendar={() => setView("calendar")}
+            onOpenRewards={() => setView("rewards")}
+            getProgress={getProgress}
+            getStreak={getStreak}
+            getNextMilestone={getNextMilestone}
+            getReadyMilestones={getReadyMilestones}
+            isCheckedInToday={isCheckedInToday}
+          />
+        ) : view === "calendar" ? (
+          <CalendarPageView
+            goals={goals}
+            onBack={() => setView("list")}
+            onToggleDay={(goalId, dateStr) => handleToggleDay(goalId, dateStr)}
+          />
+        ) : view === "rewards" ? (
+          <RewardsView
+            goals={goals}
+            onBack={() => setView("list")}
+            onSelectGoal={(id) => {
+              setSelectedGoalId(id);
+              setView("detail");
+            }}
+            onClaim={(goalId, mId) => handleClaimReward(goalId, mId)}
+          />
+        ) : view === "create" ? (
+          <CreateView
+            onSave={handleCreateGoal}
+            onCancel={() => setView("list")}
+          />
+        ) : view === "detail" && selectedGoal ? (
+          <DetailView
+            goal={selectedGoal}
+            allGoals={goals}
+            onBack={() => {
+              setView("list");
+              setSelectedGoalId(null);
+            }}
+            onCheckIn={() => handleCheckIn(selectedGoal.id)}
+            onUndoCheckIn={() => handleUndoCheckIn(selectedGoal.id)}
+            onToggleDay={(dateStr) => handleToggleDay(selectedGoal.id, dateStr)}
+            onClaim={(mId) => handleClaimReward(selectedGoal.id, mId)}
+            onAddMilestone={(m) => handleAddMilestone(selectedGoal.id, m)}
+            onDeleteMilestone={(mId) => handleDeleteMilestone(selectedGoal.id, mId)}
+            onUpdateThreshold={(t) => handleUpdateThreshold(selectedGoal.id, t)}
+            onDelete={() => handleDeleteGoal(selectedGoal.id)}
+            attemptStats={getAttemptStats(selectedGoal)}
+            getProgress={getProgress}
+            getStreak={getStreak}
+            getNextMilestone={getNextMilestone}
+            isCheckedInToday={isCheckedInToday}
+            getSortedMilestones={getSortedMilestones}
+          />
+        ) : null}
+      </div>
+
+      {celebration && (
+        <CelebrationModal
+          goalName={celebration.goalName}
+          reward={celebration.reward}
+          onClaim={() => {
+            if (celebration.goalId && celebration.milestoneId) {
+              handleClaimReward(celebration.goalId, celebration.milestoneId);
+            }
+            setCelebration(null);
+          }}
+          onClose={() => setCelebration(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ListView({
+  goals,
+  onSelect,
+  onCreate,
+  onOpenCalendar,
+  onOpenRewards,
+  getProgress,
+  getStreak,
+  getNextMilestone,
+  getReadyMilestones,
+  isCheckedInToday,
+}) {
+  return (
+    <div className="fade-in">
+      <header className="mb-10 md:mb-14 flex items-end justify-between gap-3">
+        <div>
+          <div
+            className="text-xs uppercase tracking-widest mb-2"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            ⸻ A small ledger of becoming ⸻
+          </div>
+          <h1
+            className="display text-5xl md:text-6xl leading-none"
+            style={{ color: palette.ink }}
+          >
+            your <span className="display-italic" style={{ color: palette.accent }}>habits</span>
+          </h1>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onOpenRewards}
+            className="flex items-center gap-1.5 px-4 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            style={{
+              background: palette.surface,
+              color: palette.ink,
+              border: `1px solid ${palette.border}`,
+              fontWeight: 500,
+            }}
+          >
+            <Gift size={16} />
+            <span className="hidden sm:inline">Rewards</span>
+          </button>
+          <button
+            onClick={onOpenCalendar}
+            className="flex items-center gap-1.5 px-4 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            style={{
+              background: palette.surface,
+              color: palette.ink,
+              border: `1px solid ${palette.border}`,
+              fontWeight: 500,
+            }}
+          >
+            <CalendarDays size={16} />
+            <span className="hidden sm:inline">Calendar</span>
+          </button>
+          <button
+            onClick={onCreate}
+            className="flex items-center gap-2 px-5 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            style={{
+              background: palette.ink,
+              color: palette.bg,
+              fontWeight: 500,
+            }}
+          >
+            <Plus size={16} strokeWidth={2.5} />
+            <span className="hidden sm:inline">New habit</span>
+          </button>
+        </div>
+      </header>
+
+      {goals.length === 0 ? (
+        <div
+          className="rounded-3xl p-12 text-center border-2 border-dashed"
+          style={{
+            borderColor: palette.border,
+            background: palette.surface,
+          }}
+        >
+          <Target
+            size={42}
+            strokeWidth={1.5}
+            className="mx-auto mb-4"
+            style={{ color: palette.accent }}
+          />
+          <h2 className="display text-3xl mb-2">Begin somewhere.</h2>
+          <p
+            className="display-italic text-lg mb-6"
+            style={{ color: palette.inkSoft }}
+          >
+            One small thing, done daily, becomes everything.
+          </p>
+          <button
+            onClick={onCreate}
+            className="px-6 py-3 rounded-full font-medium"
+            style={{
+              background: palette.accent,
+              color: palette.surface,
+            }}
+          >
+            Start your first habit
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {goals.map((goal) => (
+            <GoalCard
+              key={goal.id}
+              goal={goal}
+              color={getHabitColor(goal.id, goals)}
+              onClick={() => onSelect(goal.id)}
+              progress={getProgress(goal)}
+              streak={getStreak(goal)}
+              nextMilestone={getNextMilestone(goal)}
+              readyMilestones={getReadyMilestones(goal)}
+              checkedInToday={isCheckedInToday(goal)}
+            />
+          ))}
+        </div>
+      )}
+
+      <footer
+        className="mt-16 text-center display-italic text-sm"
+        style={{ color: palette.inkMuted }}
+      >
+        “We are what we repeatedly do.”
+      </footer>
+    </div>
+  );
+}
+
+function GoalCard({ goal, color, onClick, progress, streak, nextMilestone, readyMilestones, checkedInToday }) {
+  const totalMilestones = (goal.milestones || []).length;
+  const completedMilestones = (goal.milestones || []).filter((m) => m.claimed).length;
+  const daysToNext = nextMilestone ? nextMilestone.day - progress : 0;
+  const pctToNext = nextMilestone
+    ? Math.min(100, (progress / nextMilestone.day) * 100)
+    : 100;
+
+  return (
+    <button
+      onClick={onClick}
+      className="w-full text-left rounded-3xl transition-all hover:translate-y-[-2px] block overflow-hidden"
+      style={{
+        background: palette.surface,
+        border: `1px solid ${palette.border}`,
+        boxShadow: "0 1px 0 rgba(0,0,0,0.02), 0 12px 28px -18px rgba(31,26,20,0.18)",
+      }}
+    >
+      <div style={{ height: 4, background: color || palette.accent }} />
+      <div className="p-6 md:p-7">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0"
+              style={{ background: color || palette.accent }}
+            />
+            <h3 className="display text-2xl md:text-3xl truncate">
+              {goal.name}
+            </h3>
+          </div>
+          {goal.description && (
+            <p
+              className="text-sm display-italic truncate"
+              style={{ color: palette.inkMuted }}
+            >
+              {goal.description}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          {checkedInToday ? (
+            <span
+              className="text-xs px-3 py-1 rounded-full flex items-center gap-1"
+              style={{ background: palette.forest, color: palette.surface }}
+            >
+              <Check size={12} strokeWidth={3} /> done today
+            </span>
+          ) : (
+            <span
+              className="text-xs px-3 py-1 rounded-full"
+              style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+            >
+              awaiting today
+            </span>
+          )}
+          {readyMilestones.length > 0 && (
+            <span
+              className="text-xs px-3 py-1 rounded-full flex items-center gap-1"
+              style={{ background: palette.amber, color: palette.ink }}
+            >
+              <Gift size={12} /> {readyMilestones.length} reward{readyMilestones.length > 1 ? "s" : ""} ready
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-baseline gap-6 mb-4">
+        <div>
+          <div
+            className="text-[10px] uppercase tracking-widest"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Days done
+          </div>
+          <div className="display text-3xl ticker">{progress}</div>
+        </div>
+        <div>
+          <div
+            className="text-[10px] uppercase tracking-widest flex items-center gap-1"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            <Flame size={10} /> Streak
+          </div>
+          <div className="display text-3xl ticker">{streak}</div>
+        </div>
+        <div>
+          <div
+            className="text-[10px] uppercase tracking-widest"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Rewards
+          </div>
+          <div className="display text-3xl ticker">
+            {completedMilestones}<span style={{ color: palette.inkMuted }}>/{totalMilestones}</span>
+          </div>
+        </div>
+      </div>
+
+      {nextMilestone ? (
+        <div>
+          <div className="flex items-center justify-between mb-2 text-sm">
+            <span style={{ color: palette.inkSoft }}>
+              Next: <span className="display-italic" style={{ color: palette.accent }}>{nextMilestone.reward}</span>
+            </span>
+            <span className="ticker font-medium" style={{ color: palette.ink }}>
+              {daysToNext} day{daysToNext !== 1 ? "s" : ""} to go
+            </span>
+          </div>
+          <div
+            className="h-2 rounded-full overflow-hidden"
+            style={{ background: palette.surfaceDeep }}
+          >
+            <div
+              className="h-full rounded-full transition-all duration-700"
+              style={{
+                width: `${pctToNext}%`,
+                background: `linear-gradient(90deg, ${palette.accent}, ${palette.amber})`,
+              }}
+            />
+          </div>
+        </div>
+      ) : totalMilestones > 0 ? (
+        <div
+          className="text-sm display-italic flex items-center gap-2"
+          style={{ color: palette.forest }}
+        >
+          <Trophy size={16} /> Every milestone marked. Keep going — add another?
+        </div>
+      ) : (
+        <div className="text-sm" style={{ color: palette.inkMuted }}>
+          No milestones set yet. Tap to add some.
+        </div>
+      )}
+      </div>
+    </button>
+  );
+}
+
+function DetailView({
+  goal,
+  allGoals,
+  onBack,
+  onCheckIn,
+  onUndoCheckIn,
+  onToggleDay,
+  onClaim,
+  onAddMilestone,
+  onDeleteMilestone,
+  onUpdateThreshold,
+  onDelete,
+  attemptStats,
+  getProgress,
+  getStreak,
+  getNextMilestone,
+  isCheckedInToday,
+  getSortedMilestones,
+}) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [addingMilestone, setAddingMilestone] = useState(false);
+  const [newMilestone, setNewMilestone] = useState({
+    amount: 1,
+    unit: "weeks",
+    reward: "",
+  });
+  const [pendingDeleteMilestoneId, setPendingDeleteMilestoneId] = useState(null);
+  const unitToDays = { days: 1, weeks: 7, months: 30 };
+  const progress = getProgress(goal);
+  const streak = getStreak(goal);
+  const nextMilestone = getNextMilestone(goal);
+  const checkedToday = isCheckedInToday(goal);
+  const sortedMilestones = getSortedMilestones(goal);
+  const daysToNext = nextMilestone ? nextMilestone.day - progress : null;
+
+  return (
+    <div className="fade-in">
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1 text-sm mb-8 hover:gap-2 transition-all"
+        style={{ color: palette.inkSoft }}
+      >
+        <ChevronLeft size={16} /> all habits
+      </button>
+
+      <header className="mb-10">
+        <div
+          className="text-xs uppercase tracking-widest mb-3"
+          style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        >
+          Habit · started {goal.createdAt}
+        </div>
+        <h1
+          className="display text-5xl md:text-6xl leading-tight mb-2"
+          style={{ color: palette.ink }}
+        >
+          {goal.name}
+        </h1>
+        {goal.description && (
+          <p
+            className="display-italic text-xl"
+            style={{ color: palette.inkSoft }}
+          >
+            {goal.description}
+          </p>
+        )}
+      </header>
+
+      <div
+        className="rounded-3xl p-6 md:p-8 mb-8"
+        style={{
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+        }}
+      >
+        <div className="grid grid-cols-3 gap-4 mb-6">
+          <Stat label="Days done" value={progress} />
+          <Stat label="Current streak" value={streak} icon={<Flame size={12} />} />
+          <Stat
+            label={nextMilestone ? "Days to next" : "All done"}
+            value={nextMilestone ? daysToNext : "✦"}
+          />
+        </div>
+
+        {goal.createdAt > todayStrPure() ? (
+          <div
+            className="rounded-2xl p-5 flex items-center gap-3"
+            style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+          >
+            <CalendarDays size={24} strokeWidth={1.5} style={{ color: palette.accent }} />
+            <div>
+              <div className="display text-lg">Starts on {goal.createdAt}</div>
+              <div className="text-sm display-italic">
+                Check-ins open on the start date.
+              </div>
+            </div>
+          </div>
+        ) : checkedToday ? (
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div
+              className="flex-1 rounded-2xl p-5 flex items-center gap-3"
+              style={{ background: palette.forest, color: palette.surface }}
+            >
+              <CheckCircle2 size={28} strokeWidth={2} />
+              <div>
+                <div className="display text-xl">Today is done.</div>
+                <div className="text-sm opacity-80 display-italic">
+                  Rest is also part of the practice.
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={onUndoCheckIn}
+              className="px-5 py-3 rounded-2xl text-sm transition-colors"
+              style={{
+                background: palette.surfaceDeep,
+                color: palette.inkSoft,
+              }}
+            >
+              undo
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={onCheckIn}
+            className="w-full rounded-2xl py-6 px-6 transition-all hover:scale-[1.01] active:scale-[0.99] flex items-center justify-center gap-3"
+            style={{
+              background: palette.ink,
+              color: palette.bg,
+            }}
+          >
+            <Circle size={24} strokeWidth={1.5} />
+            <span className="display text-2xl">Mark today complete</span>
+          </button>
+        )}
+      </div>
+
+      <AttemptPanel
+        goal={goal}
+        attemptStats={attemptStats}
+        onUpdateThreshold={onUpdateThreshold}
+      />
+
+      <CalendarView goal={goal} allGoals={allGoals} onToggleDay={onToggleDay} />
+
+      <section className="mb-10">
+        <h2
+          className="display text-2xl mb-1 flex items-center gap-2"
+        >
+          <Sparkles size={18} style={{ color: palette.accent }} /> Milestones
+        </h2>
+        <p
+          className="display-italic text-sm mb-6"
+          style={{ color: palette.inkMuted }}
+        >
+          Markers along the path. The habit goes on; these are the treats that pace it.
+        </p>
+
+        {sortedMilestones.length === 0 ? (
+          <div
+            className="rounded-2xl p-6 text-center mb-3"
+            style={{
+              background: palette.surface,
+              border: `1px dashed ${palette.border}`,
+              color: palette.inkMuted,
+            }}
+          >
+            No milestones on this habit yet.
+          </div>
+        ) : (
+          <div className="relative mb-3">
+            <div
+              className="absolute left-6 top-3 bottom-3 w-px"
+              style={{ background: palette.border }}
+            />
+            <div className="space-y-3">
+              {sortedMilestones.map((m) => {
+                const reached = progress >= m.day;
+                const isClaimable = reached && !m.claimed;
+                const claimed = m.claimed;
+                const remaining = m.day - progress;
+                const isPendingDelete = pendingDeleteMilestoneId === m.id;
+                return (
+                  <div
+                    key={m.id}
+                    className="relative pl-16 pr-2 py-1"
+                  >
+                    <div
+                      className="absolute left-2 top-2 w-9 h-9 rounded-full flex items-center justify-center"
+                      style={{
+                        background: claimed
+                          ? palette.forest
+                          : isClaimable
+                          ? palette.amber
+                          : palette.surfaceDeep,
+                        color: claimed
+                          ? palette.surface
+                          : isClaimable
+                          ? palette.ink
+                          : palette.inkMuted,
+                        border: `2px solid ${palette.bg}`,
+                      }}
+                    >
+                      {claimed ? (
+                        <Check size={16} strokeWidth={3} />
+                      ) : isClaimable ? (
+                        <Gift size={16} />
+                      ) : (
+                        <Lock size={14} />
+                      )}
+                    </div>
+                    <div
+                      className="rounded-2xl p-4 md:p-5 flex flex-col sm:flex-row sm:items-center gap-3"
+                      style={{
+                        background: claimed
+                          ? palette.surfaceDeep
+                          : palette.surface,
+                        border: `1px solid ${
+                          isClaimable ? palette.amber : palette.borderSoft
+                        }`,
+                        opacity: claimed ? 0.85 : 1,
+                      }}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div
+                          className="text-[11px] uppercase tracking-widest mb-1"
+                          style={{
+                            color: palette.inkMuted,
+                            letterSpacing: "0.18em",
+                          }}
+                        >
+                          Day {m.day}
+                          {!reached && (
+                            <span
+                              className="ml-2 ticker"
+                              style={{ color: palette.accent }}
+                            >
+                              · {remaining} day{remaining !== 1 ? "s" : ""} left
+                            </span>
+                          )}
+                          {claimed && m.claimedAt && (
+                            <span className="ml-2" style={{ color: palette.forest }}>
+                              · claimed {m.claimedAt}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className="display text-xl"
+                          style={{
+                            textDecoration: claimed ? "line-through" : "none",
+                            textDecorationColor: palette.inkMuted,
+                          }}
+                        >
+                          {m.reward}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {isClaimable && (
+                          <button
+                            onClick={() => onClaim(m.id)}
+                            className="px-5 py-2.5 rounded-full text-sm font-medium whitespace-nowrap transition-all hover:scale-105"
+                            style={{
+                              background: palette.accent,
+                              color: palette.surface,
+                            }}
+                          >
+                            Claim reward
+                          </button>
+                        )}
+                        {!claimed && !isPendingDelete && (
+                          <button
+                            onClick={() => setPendingDeleteMilestoneId(m.id)}
+                            className="w-8 h-8 rounded-full flex items-center justify-center transition-colors"
+                            style={{
+                              color: palette.inkMuted,
+                              background: "transparent",
+                            }}
+                            aria-label="Remove milestone"
+                            title="Remove milestone"
+                          >
+                            <X size={15} />
+                          </button>
+                        )}
+                        {isPendingDelete && (
+                          <div className="flex items-center gap-1.5 text-xs">
+                            <span style={{ color: palette.accent }}>remove?</span>
+                            <button
+                              onClick={() => {
+                                onDeleteMilestone(m.id);
+                                setPendingDeleteMilestoneId(null);
+                              }}
+                              className="px-2.5 py-1 rounded-full"
+                              style={{
+                                background: palette.accent,
+                                color: palette.surface,
+                              }}
+                            >
+                              yes
+                            </button>
+                            <button
+                              onClick={() => setPendingDeleteMilestoneId(null)}
+                              className="px-2.5 py-1 rounded-full"
+                              style={{
+                                background: palette.surfaceDeep,
+                                color: palette.inkSoft,
+                              }}
+                            >
+                              no
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {addingMilestone ? (
+          <div
+            className="rounded-2xl p-4 md:p-5 fade-in"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.amber}`,
+            }}
+          >
+            <div
+              className="text-[11px] uppercase tracking-widest mb-3 flex items-center gap-1"
+              style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+            >
+              <Sparkles size={11} /> New milestone
+            </div>
+            <div className="grid grid-cols-12 gap-2 md:gap-3 items-center mb-3">
+              <span
+                className="col-span-2 text-sm text-right"
+                style={{ color: palette.inkSoft }}
+              >
+                After
+              </span>
+              <input
+                type="number"
+                min="1"
+                value={newMilestone.amount}
+                onChange={(e) =>
+                  setNewMilestone({
+                    ...newMilestone,
+                    amount: parseInt(e.target.value) || 0,
+                  })
+                }
+                className="col-span-3 px-3 py-2.5 rounded-xl outline-none ticker"
+                style={{
+                  background: palette.bg,
+                  border: `1px solid ${palette.borderSoft}`,
+                  color: palette.ink,
+                }}
+              />
+              <select
+                value={newMilestone.unit}
+                onChange={(e) =>
+                  setNewMilestone({ ...newMilestone, unit: e.target.value })
+                }
+                className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
+                style={{
+                  background: palette.bg,
+                  border: `1px solid ${palette.borderSoft}`,
+                  color: palette.ink,
+                }}
+              >
+                <option value="days">days</option>
+                <option value="weeks">weeks</option>
+                <option value="months">months</option>
+              </select>
+              <span
+                className="col-span-4 text-sm text-center display-italic"
+                style={{ color: palette.inkMuted }}
+              >
+                = {Math.round(newMilestone.amount * unitToDays[newMilestone.unit])} day
+                {Math.round(newMilestone.amount * unitToDays[newMilestone.unit]) !== 1 ? "s" : ""}
+              </span>
+            </div>
+            <input
+              value={newMilestone.reward}
+              onChange={(e) =>
+                setNewMilestone({ ...newMilestone, reward: e.target.value })
+              }
+              placeholder="Reward — e.g. ice cream, dinner out, a hotel night"
+              className="w-full px-4 py-2.5 rounded-xl outline-none mb-3"
+              style={{
+                background: palette.bg,
+                border: `1px solid ${palette.borderSoft}`,
+                color: palette.ink,
+              }}
+            />
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => {
+                  setAddingMilestone(false);
+                  setNewMilestone({ amount: 1, unit: "weeks", reward: "" });
+                }}
+                className="px-4 py-2 rounded-full text-sm"
+                style={{
+                  background: palette.surfaceDeep,
+                  color: palette.inkSoft,
+                }}
+              >
+                cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (
+                    !newMilestone.reward.trim() ||
+                    newMilestone.amount < 1
+                  )
+                    return;
+                  const day = Math.round(
+                    newMilestone.amount * unitToDays[newMilestone.unit]
+                  );
+                  onAddMilestone({
+                    id: `m_${Date.now()}_${Math.random()}`,
+                    day,
+                    reward: newMilestone.reward.trim(),
+                    claimed: false,
+                    claimedAt: null,
+                  });
+                  setNewMilestone({ amount: 1, unit: "weeks", reward: "" });
+                  setAddingMilestone(false);
+                }}
+                disabled={
+                  !newMilestone.reward.trim() || newMilestone.amount < 1
+                }
+                className="px-5 py-2 rounded-full text-sm font-medium transition-all disabled:opacity-40"
+                style={{
+                  background: palette.ink,
+                  color: palette.bg,
+                }}
+              >
+                Add milestone
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingMilestone(true)}
+            className="w-full rounded-2xl py-4 flex items-center justify-center gap-2 transition-colors hover:bg-opacity-50"
+            style={{
+              background: "transparent",
+              border: `1px dashed ${palette.border}`,
+              color: palette.inkSoft,
+            }}
+          >
+            <Plus size={16} /> Add a milestone
+          </button>
+        )}
+      </section>
+
+      <ResetHistory resets={goal.attemptResets || []} />
+
+      <div
+        className="rounded-2xl p-5 flex items-center justify-between"
+        style={{ background: palette.surface, border: `1px solid ${palette.borderSoft}` }}
+      >
+        <div className="text-sm" style={{ color: palette.inkMuted }}>
+          Stop tracking this habit?
+        </div>
+        {confirmDelete ? (
+          <div className="flex gap-2 items-center">
+            <span className="text-sm" style={{ color: palette.accent }}>
+              Erase all check-ins?
+            </span>
+            <button
+              onClick={onDelete}
+              className="px-3 py-1.5 rounded-full text-sm"
+              style={{ background: palette.accent, color: palette.surface }}
+            >
+              yes, delete
+            </button>
+            <button
+              onClick={() => setConfirmDelete(false)}
+              className="px-3 py-1.5 rounded-full text-sm"
+              style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+            >
+              cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="flex items-center gap-1 text-sm"
+            style={{ color: palette.inkSoft }}
+          >
+            <Trash2 size={14} /> Delete
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CalendarView({ goal, allGoals, onToggleDay }) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayY = today.getFullYear();
+  const todayM = today.getMonth();
+  const todayD = today.getDate();
+  const todayStr = (() => {
+    const m = String(todayM + 1).padStart(2, "0");
+    const d = String(todayD).padStart(2, "0");
+    return `${todayY}-${m}-${d}`;
+  })();
+
+  const [viewDate, setViewDate] = useState({
+    year: todayY,
+    month: todayM,
+  });
+
+  const checkInsSet = new Set(goal.checkIns || []);
+
+  const habitColor = getHabitColor(goal.id, allGoals || [goal]);
+  const msEvents = getMilestoneEvents([goal], todayStr);
+  const msByDate = indexEventsByDate(msEvents);
+
+  const dateToStr = (year, month, day) => {
+    const m = String(month + 1).padStart(2, "0");
+    const d = String(day).padStart(2, "0");
+    return `${year}-${m}-${d}`;
+  };
+
+  const monthLabel = new Date(viewDate.year, viewDate.month, 1).toLocaleString(
+    "en-US",
+    { month: "long", year: "numeric" }
+  );
+
+  const firstDayOfWeek = new Date(viewDate.year, viewDate.month, 1).getDay();
+  const daysInMonth = new Date(
+    viewDate.year,
+    viewDate.month + 1,
+    0
+  ).getDate();
+
+  const cells = [];
+  for (let i = 0; i < firstDayOfWeek; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const monthPrefix = `${viewDate.year}-${String(viewDate.month + 1).padStart(2, "0")}`;
+  const monthCount = (goal.checkIns || []).filter((s) =>
+    s.startsWith(monthPrefix)
+  ).length;
+
+  const goPrev = () => {
+    const m = viewDate.month - 1;
+    if (m < 0) setViewDate({ year: viewDate.year - 1, month: 11 });
+    else setViewDate({ year: viewDate.year, month: m });
+  };
+
+  const goNext = () => {
+    const m = viewDate.month + 1;
+    if (m > 11) setViewDate({ year: viewDate.year + 1, month: 0 });
+    else setViewDate({ year: viewDate.year, month: m });
+  };
+
+  const isFuture = (day) => {
+    const cellDate = new Date(viewDate.year, viewDate.month, day);
+    cellDate.setHours(0, 0, 0, 0);
+    return cellDate > today;
+  };
+
+  const isBeforeStart = (day) => {
+    const cellStr = dateToStr(viewDate.year, viewDate.month, day);
+    return cellStr < (goal.createdAt || cellStr);
+  };
+
+  const isToday = (day) =>
+    viewDate.year === todayY &&
+    viewDate.month === todayM &&
+    day === todayD;
+
+  const dayLabels = ["S", "M", "T", "W", "T", "F", "S"];
+
+  return (
+    <section className="mb-10">
+      <div className="flex items-end justify-between mb-1">
+        <h2 className="display text-2xl flex items-center gap-2">
+          <CalendarDays size={18} style={{ color: palette.accent }} /> Calendar
+        </h2>
+        <div
+          className="text-sm display-italic"
+          style={{ color: palette.inkSoft }}
+        >
+          <span className="ticker font-medium" style={{ color: palette.ink }}>
+            {monthCount}
+          </span>{" "}
+          day{monthCount !== 1 ? "s" : ""} this month
+        </div>
+      </div>
+      <p
+        className="display-italic text-sm mb-5"
+        style={{ color: palette.inkMuted }}
+      >
+        Tap any day to log it. The pattern is the proof.
+      </p>
+
+      <div
+        className="rounded-3xl p-5 md:p-6"
+        style={{
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+        }}
+      >
+        <div className="flex items-center justify-between mb-5">
+          <button
+            onClick={goPrev}
+            className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+            style={{
+              background: palette.surfaceDeep,
+              color: palette.inkSoft,
+            }}
+            aria-label="Previous month"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div className="display text-xl">{monthLabel}</div>
+          <button
+            onClick={goNext}
+            className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+            style={{
+              background: palette.surfaceDeep,
+              color: palette.inkSoft,
+            }}
+            aria-label="Next month"
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1 md:gap-2 mb-2">
+          {dayLabels.map((d, i) => (
+            <div
+              key={i}
+              className="text-center text-[10px] uppercase tracking-widest py-1"
+              style={{
+                color: palette.inkMuted,
+                letterSpacing: "0.2em",
+              }}
+            >
+              {d}
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-7 gap-1 md:gap-2">
+          {cells.map((day, idx) => {
+            if (day === null) {
+              return <div key={idx} className="aspect-square" />;
+            }
+            const dStr = dateToStr(viewDate.year, viewDate.month, day);
+            const completed = checkInsSet.has(dStr);
+            const future = isFuture(day);
+            const beforeStart = isBeforeStart(day);
+            const locked = future || beforeStart;
+            const today_ = isToday(day);
+            const cellEvents = msByDate[dStr] || [];
+            const earnedHere = cellEvents.find((e) => e.type === "earned");
+            const projectedHere = cellEvents.find((e) => e.type === "projected");
+
+            let bg = "transparent";
+            let color = palette.ink;
+            let border = `1px solid ${palette.borderSoft}`;
+
+            if (completed) {
+              bg = palette.forest;
+              color = palette.surface;
+              border = `1px solid ${palette.forest}`;
+            } else if (locked) {
+              bg = "transparent";
+              color = palette.inkMuted;
+              border = `1px dashed ${palette.borderSoft}`;
+            } else {
+              bg = palette.bg;
+            }
+
+            // Projected milestone styling overrides locked-future appearance
+            if (projectedHere && !completed) {
+              border = `1.5px dashed ${habitColor}`;
+              bg = `${habitColor}14`; // ~8% alpha
+              color = palette.ink;
+            }
+            // Earned overlay
+            if (earnedHere) {
+              border = `2px solid ${habitColor}`;
+            }
+
+            if (today_ && !completed && !projectedHere && !earnedHere) {
+              border = `2px solid ${palette.accent}`;
+            }
+
+            return (
+              <button
+                key={idx}
+                onClick={() => !locked && onToggleDay(dStr)}
+                disabled={locked}
+                className="aspect-square rounded-xl relative flex flex-col items-center justify-center transition-all"
+                style={{
+                  background: bg,
+                  color,
+                  border,
+                  cursor: locked ? "not-allowed" : "pointer",
+                  opacity: locked && !projectedHere ? 0.4 : 1,
+                }}
+                title={
+                  earnedHere
+                    ? `Earned: ${earnedHere.milestone.reward}`
+                    : projectedHere
+                    ? `Projected: ${projectedHere.milestone.reward}`
+                    : undefined
+                }
+              >
+                <span
+                  className="ticker text-sm md:text-base"
+                  style={{ fontWeight: today_ ? 600 : 400 }}
+                >
+                  {day}
+                </span>
+                {completed && !earnedHere && (
+                  <Check
+                    size={10}
+                    strokeWidth={3}
+                    style={{ marginTop: 1, opacity: 0.85 }}
+                  />
+                )}
+                {earnedHere && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: -5,
+                      right: -5,
+                      width: 16,
+                      height: 16,
+                      borderRadius: "50%",
+                      background: habitColor,
+                      color: palette.surface,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      border: `2px solid ${palette.surface}`,
+                    }}
+                  >
+                    <Gift size={8} strokeWidth={2.5} />
+                  </span>
+                )}
+                {projectedHere && !earnedHere && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      bottom: 2,
+                      left: 2,
+                      right: 2,
+                      fontSize: 8,
+                      lineHeight: 1,
+                      color: habitColor,
+                      fontWeight: 500,
+                      textAlign: "center",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {projectedHere.milestone.reward}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <div
+          className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-5 pt-4 text-xs"
+          style={{
+            color: palette.inkMuted,
+            borderTop: `1px solid ${palette.borderSoft}`,
+          }}
+        >
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-3 h-3 rounded"
+              style={{ background: palette.forest }}
+            />
+            done
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-3 h-3 rounded"
+              style={{
+                background: palette.bg,
+                border: `2px solid ${palette.accent}`,
+              }}
+            />
+            today
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-3 h-3 rounded"
+              style={{
+                background: palette.bg,
+                border: `1px solid ${palette.borderSoft}`,
+              }}
+            />
+            past
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-3 h-3 rounded"
+              style={{
+                background: "transparent",
+                border: `1px dashed ${palette.borderSoft}`,
+              }}
+            />
+            future
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RewardsView({ goals, onBack, onSelectGoal, onClaim }) {
+  const today = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  })();
+
+  return (
+    <div className="fade-in">
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1 text-sm mb-8 hover:gap-2 transition-all"
+        style={{ color: palette.inkSoft }}
+      >
+        <ChevronLeft size={16} /> all habits
+      </button>
+
+      <header className="mb-10">
+        <div
+          className="text-xs uppercase tracking-widest mb-3"
+          style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        >
+          What's waiting for you
+        </div>
+        <h1 className="display text-5xl md:text-6xl leading-tight">
+          all your <span className="display-italic" style={{ color: palette.accent }}>rewards</span>
+        </h1>
+      </header>
+
+      {goals.length === 0 ? (
+        <div
+          className="rounded-2xl p-10 text-center"
+          style={{
+            background: palette.surface,
+            border: `1px dashed ${palette.border}`,
+            color: palette.inkMuted,
+          }}
+        >
+          <div className="display-italic text-lg" style={{ color: palette.inkSoft }}>
+            No habits yet — no rewards yet.
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {goals.map((g) => (
+            <RewardsHabitCard
+              key={g.id}
+              goal={g}
+              color={getHabitColor(g.id, goals)}
+              today={today}
+              onSelect={() => onSelectGoal(g.id)}
+              onClaim={(mId) => onClaim(g.id, mId)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RewardsHabitCard({ goal, color, today, onSelect, onClaim }) {
+  const progress = computeEffectiveProgress(goal);
+  const sortedMs = [...(goal.milestones || [])].sort((a, b) => a.day - b.day);
+  const earnedCount = sortedMs.filter((m) => m.claimed).length;
+  const totalCount = sortedMs.length;
+
+  // Compute projected dates for unclaimed milestones
+  const projectedDateFor = (m) => {
+    if (m.claimed || progress >= m.day) return null;
+    const daysAway = m.day - progress;
+    return { daysAway, date: addDays(today, daysAway) };
+  };
+
+  return (
+    <div
+      className="rounded-3xl overflow-hidden"
+      style={{
+        background: palette.surface,
+        border: `1px solid ${palette.border}`,
+        boxShadow: "0 1px 0 rgba(0,0,0,0.02), 0 12px 28px -18px rgba(31,26,20,0.18)",
+      }}
+    >
+      {/* Color bar at top */}
+      <div style={{ height: 4, background: color }} />
+
+      <button
+        onClick={onSelect}
+        className="w-full text-left px-6 pt-5 pb-4 flex items-center justify-between gap-3 transition-colors"
+        style={{ background: "transparent" }}
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div
+            className="w-3 h-3 rounded-full shrink-0"
+            style={{ background: color }}
+          />
+          <div className="min-w-0">
+            <h3 className="display text-2xl truncate">{goal.name}</h3>
+            {goal.description && (
+              <div
+                className="text-sm display-italic truncate"
+                style={{ color: palette.inkMuted }}
+              >
+                {goal.description}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          <div
+            className="text-[10px] uppercase tracking-widest"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Earned
+          </div>
+          <div className="display text-2xl ticker" style={{ color }}>
+            {earnedCount}<span style={{ color: palette.inkMuted }}>/{totalCount}</span>
+          </div>
+        </div>
+      </button>
+
+      {sortedMs.length === 0 ? (
+        <div
+          className="px-6 pb-5 text-sm display-italic"
+          style={{ color: palette.inkMuted }}
+        >
+          No milestones set yet.
+        </div>
+      ) : (
+        <div
+          className="px-6 pb-5 space-y-2"
+          style={{ borderTop: `1px solid ${palette.borderSoft}`, paddingTop: 14 }}
+        >
+          {sortedMs.map((m) => {
+            const claimed = m.claimed;
+            const reached = !claimed && progress >= m.day;
+            const proj = projectedDateFor(m);
+
+            let statusEl;
+            if (claimed) {
+              statusEl = (
+                <span
+                  className="text-xs flex items-center gap-1"
+                  style={{ color }}
+                >
+                  <Check size={12} strokeWidth={3} /> claimed {m.claimedAt}
+                </span>
+              );
+            } else if (reached) {
+              statusEl = (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClaim(m.id);
+                  }}
+                  className="text-xs px-3 py-1 rounded-full font-medium transition-transform hover:scale-105"
+                  style={{ background: color, color: palette.surface }}
+                >
+                  Claim now
+                </button>
+              );
+            } else if (proj) {
+              statusEl = (
+                <span
+                  className="text-xs ticker"
+                  style={{ color: palette.inkMuted }}
+                >
+                  in {proj.daysAway} day{proj.daysAway !== 1 ? "s" : ""}
+                  <span className="display-italic ml-1.5" style={{ color: palette.inkSoft }}>
+                    · {proj.date}
+                  </span>
+                </span>
+              );
+            }
+
+            return (
+              <div
+                key={m.id}
+                className="flex items-center justify-between gap-3 py-1.5"
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div
+                    className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+                    style={{
+                      background: claimed ? color : "transparent",
+                      border: claimed ? "none" : `1.5px ${reached ? "solid" : "dashed"} ${color}`,
+                      color: claimed ? palette.surface : color,
+                    }}
+                  >
+                    {claimed ? (
+                      <Check size={13} strokeWidth={3} />
+                    ) : reached ? (
+                      <Gift size={12} />
+                    ) : (
+                      <Lock size={11} />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div
+                      className="text-[10px] uppercase tracking-widest"
+                      style={{ color: palette.inkMuted, letterSpacing: "0.18em" }}
+                    >
+                      Day {m.day}
+                    </div>
+                    <div
+                      className="text-base truncate"
+                      style={{
+                        color: claimed ? palette.inkMuted : palette.ink,
+                        textDecoration: claimed ? "line-through" : "none",
+                      }}
+                    >
+                      {m.reward}
+                    </div>
+                  </div>
+                </div>
+                <div className="shrink-0">{statusEl}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CalendarPageView({ goals, onBack, onToggleDay }) {
+  const [mode, setMode] = useState("day");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const [cursor, setCursor] = useState(today);
+
+  const dateToStr = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  };
+
+  const todayStr = dateToStr(today);
+  const msEvents = getMilestoneEvents(goals, todayStr);
+  const msByDate = indexEventsByDate(msEvents);
+
+  const startOfWeek = (date) => {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - d.getDay());
+    return d;
+  };
+
+  const navigatePrev = () => {
+    const d = new Date(cursor);
+    if (mode === "month") d.setMonth(d.getMonth() - 1);
+    else if (mode === "week") d.setDate(d.getDate() - 7);
+    else d.setDate(d.getDate() - 1);
+    setCursor(d);
+  };
+
+  const navigateNext = () => {
+    const d = new Date(cursor);
+    if (mode === "month") d.setMonth(d.getMonth() + 1);
+    else if (mode === "week") d.setDate(d.getDate() + 7);
+    else d.setDate(d.getDate() + 1);
+    setCursor(d);
+  };
+
+  const goToToday = () => setCursor(new Date(today));
+
+  const headerLabel = () => {
+    if (mode === "month") {
+      return cursor.toLocaleString("en-US", {
+        month: "long",
+        year: "numeric",
+      });
+    }
+    if (mode === "week") {
+      const start = startOfWeek(cursor);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      const sameMonth = start.getMonth() === end.getMonth();
+      const sameYear = start.getFullYear() === end.getFullYear();
+      const startStr = start.toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+      });
+      const endStr = sameMonth
+        ? end.toLocaleString("en-US", { day: "numeric" })
+        : end.toLocaleString("en-US", { month: "short", day: "numeric" });
+      const yearStr = sameYear ? end.getFullYear() : `${start.getFullYear()}–${end.getFullYear()}`;
+      return `${startStr} – ${endStr}, ${yearStr}`;
+    }
+    return cursor.toLocaleString("en-US", {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+  };
+
+  const isCursorToday = dateToStr(cursor) === dateToStr(today);
+
+  return (
+    <div className="fade-in">
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1 text-sm mb-8 hover:gap-2 transition-all"
+        style={{ color: palette.inkSoft }}
+      >
+        <ChevronLeft size={16} /> all habits
+      </button>
+
+      <header className="mb-8">
+        <div
+          className="text-xs uppercase tracking-widest mb-3"
+          style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        >
+          What's on the page today
+        </div>
+        <h1 className="display text-5xl md:text-6xl leading-tight">
+          your <span className="display-italic" style={{ color: palette.accent }}>calendar</span>
+        </h1>
+      </header>
+
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+        <div
+          className="inline-flex p-1 rounded-full self-start"
+          style={{
+            background: palette.surfaceDeep,
+            border: `1px solid ${palette.borderSoft}`,
+          }}
+        >
+          {["month", "week", "day"].map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className="px-4 py-1.5 rounded-full text-sm capitalize transition-all"
+              style={{
+                background: mode === m ? palette.ink : "transparent",
+                color: mode === m ? palette.bg : palette.inkSoft,
+                fontWeight: mode === m ? 600 : 500,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        {!isCursorToday && (
+          <button
+            onClick={goToToday}
+            className="px-4 py-1.5 rounded-full text-sm self-start sm:self-center"
+            style={{
+              background: palette.surface,
+              color: palette.accent,
+              border: `1px solid ${palette.border}`,
+            }}
+          >
+            Jump to today
+          </button>
+        )}
+      </div>
+
+      <div
+        className="rounded-3xl p-5 md:p-7"
+        style={{
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+        }}
+      >
+        <div className="flex items-center justify-between mb-6">
+          <button
+            onClick={navigatePrev}
+            className="w-10 h-10 rounded-full flex items-center justify-center transition-colors"
+            style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+            aria-label="Previous"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div className="display text-xl md:text-2xl text-center px-2">
+            {headerLabel()}
+          </div>
+          <button
+            onClick={navigateNext}
+            className="w-10 h-10 rounded-full flex items-center justify-center transition-colors"
+            style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+            aria-label="Next"
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+
+        {goals.length === 0 ? (
+          <div
+            className="text-center py-10 display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            No habits yet. Create one and they'll appear here.
+          </div>
+        ) : mode === "day" ? (
+          <DayMode
+            cursor={cursor}
+            today={today}
+            goals={goals}
+            msByDate={msByDate}
+            dateToStr={dateToStr}
+            onToggleDay={onToggleDay}
+          />
+        ) : mode === "week" ? (
+          <WeekMode
+            cursor={cursor}
+            today={today}
+            goals={goals}
+            msByDate={msByDate}
+            dateToStr={dateToStr}
+            startOfWeek={startOfWeek}
+            onToggleDay={onToggleDay}
+            onJumpToDay={(d) => {
+              setCursor(d);
+              setMode("day");
+            }}
+          />
+        ) : (
+          <MonthMode
+            cursor={cursor}
+            today={today}
+            goals={goals}
+            msByDate={msByDate}
+            dateToStr={dateToStr}
+            onJumpToDay={(d) => {
+              setCursor(d);
+              setMode("day");
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DayMode({ cursor, today, goals, msByDate, dateToStr, onToggleDay }) {
+  const dStr = dateToStr(cursor);
+  const isFuture = cursor > today;
+  const activeGoals = goals.filter((g) => (g.createdAt || dStr) <= dStr);
+  const completed = activeGoals.filter((g) => (g.checkIns || []).includes(dStr));
+  const total = activeGoals.length;
+  const scheduledCount = goals.length - activeGoals.length;
+  const dayEvents = msByDate[dStr] || [];
+
+  return (
+    <div>
+      <div
+        className="text-center mb-6 pb-5"
+        style={{ borderBottom: `1px solid ${palette.borderSoft}` }}
+      >
+        <div
+          className="text-xs uppercase tracking-widest mb-1"
+          style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        >
+          {isFuture ? "Coming up" : "On this day"}
+        </div>
+        <div className="display text-3xl md:text-4xl">
+          <span className="ticker">{completed.length}</span>
+          <span style={{ color: palette.inkMuted }}> of </span>
+          <span className="ticker">{total}</span>
+          <span className="display-italic" style={{ color: palette.inkSoft }}>
+            {" "}
+            done
+          </span>
+        </div>
+        {dayEvents.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+            {dayEvents.map((e, i) => {
+              const c = getHabitColor(e.habit.id, goals);
+              return (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs"
+                  style={{
+                    background: e.type === "earned" ? c : "transparent",
+                    color: e.type === "earned" ? palette.surface : c,
+                    border: e.type === "earned" ? "none" : `1.5px dashed ${c}`,
+                    fontWeight: 500,
+                  }}
+                  title={`${e.habit.name}: ${e.milestone.reward}`}
+                >
+                  <Gift size={11} />
+                  {e.milestone.reward}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {activeGoals.map((g) => {
+          const done = (g.checkIns || []).includes(dStr);
+          return (
+            <button
+              key={g.id}
+              onClick={() => !isFuture && onToggleDay(g.id, dStr)}
+              disabled={isFuture}
+              className="w-full text-left rounded-2xl p-4 md:p-5 flex items-center gap-4 transition-all"
+              style={{
+                background: done ? palette.surfaceDeep : palette.bg,
+                border: `1px solid ${done ? palette.forest : palette.borderSoft}`,
+                opacity: isFuture ? 0.55 : 1,
+                cursor: isFuture ? "not-allowed" : "pointer",
+              }}
+            >
+              <div
+                className="w-10 h-10 rounded-full flex items-center justify-center shrink-0"
+                style={{
+                  background: done ? palette.forest : "transparent",
+                  border: done ? "none" : `2px solid ${palette.border}`,
+                  color: done ? palette.surface : palette.inkMuted,
+                }}
+              >
+                {done ? <Check size={18} strokeWidth={3} /> : <Circle size={18} strokeWidth={1.5} />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div
+                  className="display text-xl truncate"
+                  style={{
+                    textDecoration: done ? "line-through" : "none",
+                    textDecorationColor: palette.inkMuted,
+                  }}
+                >
+                  {g.name}
+                </div>
+                {g.description && (
+                  <div
+                    className="text-sm display-italic truncate"
+                    style={{ color: palette.inkMuted }}
+                  >
+                    {g.description}
+                  </div>
+                )}
+              </div>
+            </button>
+          );
+        })}
+        {activeGoals.length === 0 && (
+          <div
+            className="text-center py-6 display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            No habits had started yet on this day.
+          </div>
+        )}
+        {scheduledCount > 0 && (
+          <div
+            className="text-center pt-2 text-xs display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            {scheduledCount} habit{scheduledCount !== 1 ? "s" : ""} scheduled to start later — not shown here.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WeekMode({ cursor, today, goals, msByDate, dateToStr, startOfWeek, onToggleDay, onJumpToDay }) {
+  const start = startOfWeek(cursor);
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    days.push(d);
+  }
+
+  return (
+    <div className="space-y-3">
+      {days.map((d, i) => {
+        const dStr = dateToStr(d);
+        const isFuture = d > today;
+        const isToday = dStr === dateToStr(today);
+        const activeGoals = goals.filter((g) => (g.createdAt || dStr) <= dStr);
+        const completed = activeGoals.filter((g) =>
+          (g.checkIns || []).includes(dStr)
+        );
+        const dayLabel = d.toLocaleString("en-US", { weekday: "long" });
+        const dateLabel = d.toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+        });
+        const dayEvents = msByDate[dStr] || [];
+        const eventByHabit = {};
+        for (const e of dayEvents) eventByHabit[e.habit.id] = e;
+
+        return (
+          <div
+            key={i}
+            className="rounded-2xl overflow-hidden"
+            style={{
+              background: palette.bg,
+              border: `1px solid ${
+                isToday ? palette.accent : palette.borderSoft
+              }`,
+              opacity: isFuture ? 0.6 : 1,
+            }}
+          >
+            <button
+              onClick={() => onJumpToDay(d)}
+              className="w-full px-4 py-3 flex items-center justify-between gap-3"
+              style={{
+                background: isToday ? palette.surface : palette.surfaceDeep,
+                borderBottom: `1px solid ${palette.borderSoft}`,
+              }}
+            >
+              <div className="flex items-baseline gap-3 min-w-0">
+                <span className="display text-base">{dayLabel}</span>
+                <span
+                  className="text-sm display-italic truncate"
+                  style={{ color: palette.inkMuted }}
+                >
+                  {dateLabel}
+                </span>
+                {isToday && (
+                  <span
+                    className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0"
+                    style={{
+                      background: palette.accent,
+                      color: palette.surface,
+                      letterSpacing: "0.18em",
+                    }}
+                  >
+                    today
+                  </span>
+                )}
+              </div>
+              <span className="ticker text-sm shrink-0" style={{ color: palette.inkSoft }}>
+                {completed.length}/{activeGoals.length}
+              </span>
+            </button>
+            <div className="p-3 space-y-1.5">
+              {activeGoals.length === 0 ? (
+                <div
+                  className="text-xs display-italic px-2 py-1"
+                  style={{ color: palette.inkMuted }}
+                >
+                  No habits had started yet.
+                </div>
+              ) : (
+                activeGoals.map((g) => {
+                const done = (g.checkIns || []).includes(dStr);
+                const ev = eventByHabit[g.id];
+                const habitC = ev ? getHabitColor(g.id, goals) : null;
+                return (
+                  <button
+                    key={g.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!isFuture) onToggleDay(g.id, dStr);
+                    }}
+                    disabled={isFuture}
+                    className="w-full text-left rounded-xl px-3 py-2 flex items-center gap-3 transition-all"
+                    style={{
+                      background: done ? palette.surfaceDeep : "transparent",
+                      cursor: isFuture ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    <div
+                      className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
+                      style={{
+                        background: done ? palette.forest : "transparent",
+                        border: done ? "none" : `1.5px solid ${palette.border}`,
+                        color: done ? palette.surface : "transparent",
+                      }}
+                    >
+                      {done && <Check size={12} strokeWidth={3} />}
+                    </div>
+                    <span
+                      className="text-sm truncate flex-1"
+                      style={{
+                        color: done ? palette.inkSoft : palette.ink,
+                        textDecoration: done ? "line-through" : "none",
+                        textDecorationColor: palette.inkMuted,
+                      }}
+                    >
+                      {g.name}
+                    </span>
+                    {ev && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-full inline-flex items-center gap-1 shrink-0"
+                        style={{
+                          background: ev.type === "earned" ? habitC : "transparent",
+                          color: ev.type === "earned" ? palette.surface : habitC,
+                          border: ev.type === "earned" ? "none" : `1px dashed ${habitC}`,
+                          fontWeight: 500,
+                        }}
+                        title={ev.milestone.reward}
+                      >
+                        <Gift size={9} />
+                        <span className="truncate max-w-[70px]">{ev.milestone.reward}</span>
+                      </span>
+                    )}
+                  </button>
+                );
+                })
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MonthMode({ cursor, today, goals, msByDate, dateToStr, onJumpToDay }) {
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const firstDayOfWeek = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const cells = [];
+  for (let i = 0; i < firstDayOfWeek; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const dayLabels = ["S", "M", "T", "W", "T", "F", "S"];
+  const todayStr = dateToStr(today);
+
+  return (
+    <div>
+      <div className="grid grid-cols-7 gap-1 md:gap-2 mb-2">
+        {dayLabels.map((d, i) => (
+          <div
+            key={i}
+            className="text-center text-[10px] uppercase tracking-widest py-1"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            {d}
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 md:gap-2">
+        {cells.map((day, idx) => {
+          if (day === null) return <div key={idx} className="aspect-square" />;
+          const date = new Date(year, month, day);
+          date.setHours(0, 0, 0, 0);
+          const dStr = dateToStr(date);
+          const isFuture = date > today;
+          const isToday = dStr === todayStr;
+          const activeGoals = goals.filter((g) => (g.createdAt || dStr) <= dStr);
+          const completed = activeGoals.filter((g) =>
+            (g.checkIns || []).includes(dStr)
+          ).length;
+          const total = activeGoals.length;
+          const ratio = total > 0 ? completed / total : 0;
+          const allDone = total > 0 && completed === total;
+
+          let bg = palette.bg;
+          let dotColor = palette.amber;
+          if (isFuture) {
+            bg = "transparent";
+          } else if (allDone) {
+            bg = palette.forest;
+          } else if (ratio > 0) {
+            bg = palette.surfaceDeep;
+          }
+
+          return (
+            <button
+              key={idx}
+              onClick={() => !isFuture && onJumpToDay(date)}
+              disabled={isFuture}
+              className="aspect-square rounded-xl p-1.5 md:p-2 flex flex-col items-start justify-between transition-all"
+              style={{
+                background: bg,
+                border: isToday
+                  ? `2px solid ${palette.accent}`
+                  : isFuture
+                  ? `1px dashed ${palette.borderSoft}`
+                  : `1px solid ${palette.borderSoft}`,
+                color: allDone ? palette.surface : palette.ink,
+                cursor: isFuture ? "not-allowed" : "pointer",
+                opacity: isFuture ? 0.5 : 1,
+              }}
+            >
+              <span
+                className="ticker text-xs md:text-sm"
+                style={{ fontWeight: isToday ? 600 : 400 }}
+              >
+                {day}
+              </span>
+              {(() => {
+                const evs = msByDate[dStr] || [];
+                if (evs.length === 0) return null;
+                return (
+                  <div
+                    className="flex flex-wrap gap-[2px] self-end justify-end"
+                    style={{ marginTop: "auto" }}
+                  >
+                    {evs.slice(0, 4).map((e, i) => {
+                      const c = getHabitColor(e.habit.id, goals);
+                      return (
+                        <span
+                          key={i}
+                          style={{
+                            display: "inline-block",
+                            width: 6,
+                            height: 6,
+                            borderRadius: "50%",
+                            background: e.type === "earned" ? c : "transparent",
+                            border: e.type === "earned" ? "none" : `1.5px solid ${c}`,
+                          }}
+                          title={`${e.habit.name}: ${e.milestone.reward}`}
+                        />
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+              {!isFuture && total > 0 && (
+                <div className="flex items-center gap-0.5 self-end">
+                  {completed > 0 && completed < total && (
+                    <span
+                      className="text-[9px] md:text-[10px] ticker"
+                      style={{ color: palette.inkMuted }}
+                    >
+                      {completed}/{total}
+                    </span>
+                  )}
+                  {allDone && (
+                    <Check size={11} strokeWidth={3} style={{ color: palette.surface }} />
+                  )}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-5 pt-4 text-xs"
+        style={{
+          color: palette.inkMuted,
+          borderTop: `1px solid ${palette.borderSoft}`,
+        }}
+      >
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-3 rounded"
+            style={{ background: palette.forest }}
+          />
+          all done
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-3 rounded"
+            style={{ background: palette.surfaceDeep }}
+          />
+          some done
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-3 rounded"
+            style={{
+              background: palette.bg,
+              border: `2px solid ${palette.accent}`,
+            }}
+          />
+          today
+        </span>
+        <span style={{ color: palette.inkMuted }} className="display-italic">
+          tap a day to open it
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function AttemptPanel({ goal, attemptStats, onUpdateThreshold }) {
+  const { elapsedDays, completedDays, missedDays, missRate, attemptStart } = attemptStats;
+  const threshold = goal.missRateThreshold ?? RESET_MISS_RATE;
+
+  const today = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  })();
+
+  const minDays = 5;
+  const fillRatio = Math.min(1, missRate / threshold);
+  const warningZone = threshold * 0.66;
+  const isWarning = missRate > warningZone && missRate <= threshold;
+  const isDanger = missRate > threshold;
+  const tooEarly = elapsedDays < minDays;
+
+  const barColor = isDanger
+    ? palette.accent
+    : isWarning
+    ? palette.amber
+    : palette.forest;
+
+  const recentReset = (goal.attemptResets || [])
+    .filter((r) => r.date === today)
+    .slice(-1)[0];
+
+  const pct = Math.round(missRate * 100);
+  const thresholdPct = Math.round(threshold * 100);
+
+  const [editingThreshold, setEditingThreshold] = useState(false);
+  const [draftThreshold, setDraftThreshold] = useState(threshold);
+
+  const startEdit = () => {
+    setDraftThreshold(threshold);
+    setEditingThreshold(true);
+  };
+  const commitEdit = () => {
+    onUpdateThreshold(draftThreshold);
+    setEditingThreshold(false);
+  };
+  const cancelEdit = () => setEditingThreshold(false);
+
+  return (
+    <div
+      className="rounded-2xl p-5 mb-8"
+      style={{
+        background: palette.surface,
+        border: `1px solid ${isDanger ? palette.accent : palette.border}`,
+      }}
+    >
+      {recentReset && (
+        <div
+          className="rounded-xl px-4 py-3 mb-4 flex items-start gap-2 text-sm"
+          style={{
+            background: palette.surfaceDeep,
+            color: palette.ink,
+            border: `1px solid ${palette.amber}`,
+          }}
+        >
+          <RotateCcw size={16} style={{ color: palette.accent, marginTop: 2 }} />
+          <div>
+            <div style={{ fontWeight: 600 }}>Progress reset today.</div>
+            <div className="text-xs mt-0.5 display-italic" style={{ color: palette.inkSoft }}>
+              {recentReset.completedDays} of {recentReset.elapsedDays} days completed in your last attempt ({Math.round(recentReset.missRate * 100)}% missed). Calendar history is intact — fresh start now.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <AttemptPanelStateContent
+        goal={goal}
+        attemptStats={attemptStats}
+        today={today}
+        threshold={threshold}
+        thresholdPct={thresholdPct}
+        barColor={barColor}
+        fillRatio={fillRatio}
+        isWarning={isWarning}
+        isDanger={isDanger}
+        tooEarly={tooEarly}
+        minDays={minDays}
+        pct={pct}
+      />
+
+      {editingThreshold ? (
+        <div
+          className="rounded-xl mt-4 p-4"
+          style={{
+            background: palette.bg,
+            border: `1px solid ${palette.borderSoft}`,
+          }}
+        >
+          <div
+            className="text-[10px] uppercase tracking-widest mb-3"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Set reset threshold for this habit
+          </div>
+          <ThresholdSlider
+            value={draftThreshold}
+            onChange={setDraftThreshold}
+          />
+          <div className="flex gap-2 justify-end mt-4">
+            <button
+              onClick={cancelEdit}
+              className="px-4 py-1.5 rounded-full text-sm"
+              style={{
+                background: palette.surfaceDeep,
+                color: palette.inkSoft,
+              }}
+            >
+              cancel
+            </button>
+            <button
+              onClick={commitEdit}
+              className="px-4 py-1.5 rounded-full text-sm font-medium"
+              style={{
+                background: palette.ink,
+                color: palette.bg,
+              }}
+            >
+              save
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          className="flex items-center justify-between mt-3 pt-3 text-xs"
+          style={{
+            color: palette.inkMuted,
+            borderTop: `1px solid ${palette.borderSoft}`,
+          }}
+        >
+          <span className="display-italic">
+            Resets at {thresholdPct}% miss rate · stricter habits use lower numbers
+          </span>
+          <button
+            onClick={startEdit}
+            className="flex items-center gap-1 hover:underline"
+            style={{ color: palette.accent }}
+          >
+            <Settings2 size={12} /> adjust
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttemptPanelStateContent({
+  goal,
+  attemptStats,
+  today,
+  threshold,
+  thresholdPct,
+  barColor,
+  fillRatio,
+  isWarning,
+  isDanger,
+  tooEarly,
+  minDays,
+  pct,
+}) {
+  const { elapsedDays, completedDays, missedDays, attemptStart } = attemptStats;
+  const isScheduled = goal.createdAt > today;
+  const isNotStarted = !isScheduled && completedDays === 0;
+
+  if (isScheduled) {
+    const startDate = new Date(goal.createdAt + "T00:00:00");
+    const todayDate = new Date(today + "T00:00:00");
+    const daysUntil = Math.max(
+      0,
+      Math.round((startDate - todayDate) / 86400000)
+    );
+    return (
+      <div className="flex items-center gap-4 py-2">
+        <div
+          className="w-12 h-12 rounded-full flex items-center justify-center shrink-0"
+          style={{ background: palette.amber, color: palette.ink }}
+        >
+          <CalendarDays size={22} />
+        </div>
+        <div className="min-w-0">
+          <div
+            className="text-[10px] uppercase tracking-widest mb-1"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Scheduled
+          </div>
+          <div className="display text-xl leading-tight">
+            Starts in <span className="ticker">{daysUntil}</span> day
+            {daysUntil !== 1 ? "s" : ""}
+          </div>
+          <div
+            className="text-sm display-italic mt-0.5"
+            style={{ color: palette.inkSoft }}
+          >
+            on {goal.createdAt}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isNotStarted) {
+    return (
+      <div className="text-center py-4">
+        <div className="display text-xl mb-1">Ready when you are.</div>
+        <div
+          className="text-sm display-italic"
+          style={{ color: palette.inkSoft }}
+        >
+          Make your first check-in to start the clock — until then no resets, no warnings.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex items-end justify-between mb-3 gap-3">
+        <div>
+          <div
+            className="text-[10px] uppercase tracking-widest mb-1"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Current attempt · since {attemptStart}
+          </div>
+          <div className="display text-lg leading-tight">
+            <span className="ticker">{elapsedDays}</span> day
+            {elapsedDays !== 1 ? "s" : ""} ·{" "}
+            <span className="ticker" style={{ color: palette.forest }}>
+              {completedDays}
+            </span>{" "}
+            done ·{" "}
+            <span
+              className="ticker"
+              style={{
+                color: missedDays > 0 ? palette.accent : palette.inkMuted,
+              }}
+            >
+              {missedDays}
+            </span>{" "}
+            missed
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          <div
+            className="text-[10px] uppercase tracking-widest"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Miss rate
+          </div>
+          <div className="display text-2xl ticker" style={{ color: barColor }}>
+            {pct}%
+          </div>
+        </div>
+      </div>
+
+      <div
+        className="h-2 rounded-full overflow-hidden mb-2 relative"
+        style={{ background: palette.surfaceDeep }}
+      >
+        <div
+          className="h-full rounded-full transition-all duration-500"
+          style={{
+            width: `${fillRatio * 100}%`,
+            background: barColor,
+          }}
+        />
+      </div>
+      <div
+        className="flex items-center justify-between text-xs"
+        style={{ color: palette.inkMuted }}
+      >
+        <span>0%</span>
+        <span className="display-italic text-center px-2 truncate">
+          {tooEarly
+            ? `Reset rule activates after day ${minDays}`
+            : isDanger
+            ? "Over the limit — next save will reset your progress"
+            : isWarning
+            ? "Getting close to the reset line"
+            : "Plenty of room. Keep showing up."}
+        </span>
+        <span style={{ color: palette.accent, fontWeight: 600 }}>
+          {thresholdPct}%
+        </span>
+      </div>
+    </>
+  );
+}
+
+function ThresholdSlider({ value, onChange }) {
+  const pct = Math.round(value * 100);
+  return (
+    <div>
+      <div className="flex items-center gap-4">
+        <input
+          type="range"
+          min="10"
+          max="50"
+          step="5"
+          value={pct}
+          onChange={(e) => onChange(parseInt(e.target.value) / 100)}
+          className="flex-1 cursor-pointer"
+          style={{
+            accentColor: palette.accent,
+            height: 6,
+          }}
+        />
+        <div
+          className="display ticker text-3xl shrink-0 text-right"
+          style={{ color: palette.accent, minWidth: "3.5ch" }}
+        >
+          {pct}%
+        </div>
+      </div>
+      <div
+        className="flex items-center justify-between text-[10px] uppercase tracking-widest mt-2"
+        style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+      >
+        <span>strict</span>
+        <span>standard</span>
+        <span>forgiving</span>
+      </div>
+      <div
+        className="text-xs mt-3 display-italic"
+        style={{ color: palette.inkMuted }}
+      >
+        If you miss more than {pct}% of days during an attempt, your milestone progress resets. Your check-in calendar is never erased.
+      </div>
+    </div>
+  );
+}
+
+function ResetHistory({ resets }) {
+  if (!resets || resets.length === 0) return null;
+  const recent = [...resets].slice(-5).reverse();
+
+  return (
+    <section className="mb-8">
+      <h3
+        className="display text-xl mb-1 flex items-center gap-2"
+        style={{ color: palette.inkSoft }}
+      >
+        <RotateCcw size={16} /> Past resets
+      </h3>
+      <p
+        className="display-italic text-sm mb-4"
+        style={{ color: palette.inkMuted }}
+      >
+        Times the attempt fell below 70% adherence. The check-in calendar still has every day you showed up.
+      </p>
+      <div className="space-y-2">
+        {recent.map((r, i) => (
+          <div
+            key={i}
+            className="rounded-xl px-4 py-3 flex items-center justify-between text-sm"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.borderSoft}`,
+            }}
+          >
+            <div>
+              <span className="ticker" style={{ color: palette.ink }}>
+                {r.date}
+              </span>
+              <span className="display-italic ml-2" style={{ color: palette.inkMuted }}>
+                attempt from {r.previousStart}
+              </span>
+            </div>
+            <div className="ticker text-xs" style={{ color: palette.inkSoft }}>
+              {r.completedDays}/{r.elapsedDays} days ·{" "}
+              <span style={{ color: palette.accent }}>
+                {Math.round(r.missRate * 100)}% missed
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Stat({ label, value, icon }) {
+  return (
+    <div
+      className="rounded-2xl p-4"
+      style={{ background: palette.surfaceDeep }}
+    >
+      <div
+        className="text-[10px] uppercase tracking-widest mb-1 flex items-center gap-1"
+        style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+      >
+        {icon} {label}
+      </div>
+      <div className="display text-3xl ticker" style={{ color: palette.ink }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function CreateView({ onSave, onCancel }) {
+  const todayDefault = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  })();
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [startDate, setStartDate] = useState(todayDefault);
+  const [missRateThreshold, setMissRateThreshold] = useState(0.30);
+  const [milestones, setMilestones] = useState([
+    { id: `m_${Date.now()}_1`, amount: 1, unit: "weeks", reward: "" },
+  ]);
+
+  const unitToDays = { days: 1, weeks: 7, months: 30 };
+
+  const addMilestone = () => {
+    setMilestones([
+      ...milestones,
+      {
+        id: `m_${Date.now()}_${Math.random()}`,
+        amount: milestones.length + 1,
+        unit: "weeks",
+        reward: "",
+      },
+    ]);
+  };
+
+  const updateMilestone = (id, patch) => {
+    setMilestones(milestones.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  };
+
+  const removeMilestone = (id) => {
+    setMilestones(milestones.filter((m) => m.id !== id));
+  };
+
+  const canSave =
+    name.trim().length > 0 &&
+    milestones.every((m) => m.amount > 0 && m.reward.trim().length > 0);
+
+  const handleSave = () => {
+    if (!canSave) return;
+    const finalMilestones = milestones
+      .map((m) => ({
+        id: m.id,
+        day: Math.round(m.amount * unitToDays[m.unit]),
+        reward: m.reward.trim(),
+        claimed: false,
+        claimedAt: null,
+      }))
+      .sort((a, b) => a.day - b.day);
+
+    onSave({
+      name: name.trim(),
+      description: description.trim(),
+      startDate,
+      missRateThreshold,
+      milestones: finalMilestones,
+    });
+  };
+
+  return (
+    <div className="fade-in">
+      <button
+        onClick={onCancel}
+        className="flex items-center gap-1 text-sm mb-8 hover:gap-2 transition-all"
+        style={{ color: palette.inkSoft }}
+      >
+        <ChevronLeft size={16} /> back
+      </button>
+
+      <h1
+        className="display text-5xl md:text-6xl leading-tight mb-2"
+      >
+        a new <span className="display-italic" style={{ color: palette.accent }}>habit</span>
+      </h1>
+      <p
+        className="display-italic text-lg mb-10"
+        style={{ color: palette.inkMuted }}
+      >
+        Name what you'll show up for. Mark the path with rewards worth showing up for.
+      </p>
+
+      <div className="space-y-6 mb-10">
+        <Field label="What's the habit?">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Daily yoga"
+            className="w-full px-5 py-4 rounded-2xl outline-none text-lg"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.ink,
+            }}
+          />
+        </Field>
+
+        <Field label="A little more (optional)">
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="30 minutes every morning before coffee"
+            rows={2}
+            className="w-full px-5 py-4 rounded-2xl outline-none resize-none"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.ink,
+            }}
+          />
+        </Field>
+
+        <Field label="When are you starting?">
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+            className="w-full px-5 py-4 rounded-2xl outline-none text-lg ticker"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.ink,
+              colorScheme: "light",
+            }}
+          />
+          <div
+            className="text-xs mt-2 display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            {startDate === todayDefault
+              ? "Today by default. Pick a past date to backdate, or a future date to schedule."
+              : startDate < todayDefault
+              ? `Backdated by ${Math.abs(Math.round((new Date(startDate + "T00:00:00") - new Date(todayDefault + "T00:00:00")) / 86400000))} days. You can mark past completions in the calendar after creating.`
+              : `Scheduled to start in ${Math.round((new Date(startDate + "T00:00:00") - new Date(todayDefault + "T00:00:00")) / 86400000)} days.`}
+          </div>
+        </Field>
+
+        <div>
+          <div
+            className="text-xs uppercase tracking-widest mb-2"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Reset threshold
+          </div>
+          <div
+            className="rounded-2xl p-5"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+            }}
+          >
+            <ThresholdSlider
+              value={missRateThreshold}
+              onChange={setMissRateThreshold}
+            />
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <div
+                className="text-xs uppercase tracking-widest mb-1"
+                style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+              >
+                Milestones & rewards
+              </div>
+              <div
+                className="display-italic text-sm"
+                style={{ color: palette.inkSoft }}
+              >
+                Mark the path with treats worth showing up for.
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {milestones.map((m, i) => (
+              <div
+                key={m.id}
+                className="rounded-2xl p-4 md:p-5"
+                style={{
+                  background: palette.surface,
+                  border: `1px solid ${palette.border}`,
+                }}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div
+                    className="text-[11px] uppercase tracking-widest flex items-center gap-1"
+                    style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                  >
+                    <Sparkles size={11} /> Milestone {i + 1}
+                  </div>
+                  {milestones.length > 1 && (
+                    <button
+                      onClick={() => removeMilestone(m.id)}
+                      style={{ color: palette.inkMuted }}
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-12 gap-2 md:gap-3 items-center">
+                  <span
+                    className="col-span-2 text-sm text-right"
+                    style={{ color: palette.inkSoft }}
+                  >
+                    After
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={m.amount}
+                    onChange={(e) =>
+                      updateMilestone(m.id, {
+                        amount: parseInt(e.target.value) || 0,
+                      })
+                    }
+                    className="col-span-3 px-3 py-2.5 rounded-xl outline-none ticker"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  />
+                  <select
+                    value={m.unit}
+                    onChange={(e) =>
+                      updateMilestone(m.id, { unit: e.target.value })
+                    }
+                    className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  >
+                    <option value="days">days</option>
+                    <option value="weeks">weeks</option>
+                    <option value="months">months</option>
+                  </select>
+                  <span
+                    className="col-span-4 text-sm text-center display-italic"
+                    style={{ color: palette.inkMuted }}
+                  >
+                    = {Math.round(m.amount * unitToDays[m.unit])} day{Math.round(m.amount * unitToDays[m.unit]) !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div className="mt-3">
+                  <input
+                    value={m.reward}
+                    onChange={(e) =>
+                      updateMilestone(m.id, { reward: e.target.value })
+                    }
+                    placeholder="Reward — e.g. ice cream, dinner out, a hotel night"
+                    className="w-full px-4 py-2.5 rounded-xl outline-none"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+
+            <button
+              onClick={addMilestone}
+              className="w-full rounded-2xl py-4 flex items-center justify-center gap-2 transition-colors"
+              style={{
+                background: "transparent",
+                border: `1px dashed ${palette.border}`,
+                color: palette.inkSoft,
+              }}
+            >
+              <Plus size={16} /> Add another milestone
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex gap-3">
+        <button
+          onClick={onCancel}
+          className="px-6 py-3 rounded-full"
+          style={{
+            background: palette.surfaceDeep,
+            color: palette.inkSoft,
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          className="flex-1 px-6 py-3 rounded-full transition-all disabled:opacity-40"
+          style={{
+            background: palette.ink,
+            color: palette.bg,
+          }}
+        >
+          Begin
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="block">
+      <div
+        className="text-xs uppercase tracking-widest mb-2"
+        style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+      >
+        {label}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function CelebrationModal({ goalName, reward, onClaim, onClose }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-6"
+      style={{ background: "rgba(31, 26, 20, 0.55)" }}
+      onClick={onClose}
+    >
+      <div
+        className="rounded-3xl p-8 md:p-10 max-w-md w-full text-center pop"
+        style={{
+          background: palette.surface,
+          border: `2px solid ${palette.amber}`,
+          fontFamily: fonts.body,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="w-16 h-16 rounded-full mx-auto mb-5 flex items-center justify-center"
+          style={{ background: palette.amber, color: palette.ink }}
+        >
+          <Trophy size={32} />
+        </div>
+        <div
+          className="text-xs uppercase tracking-widest mb-2"
+          style={{ color: palette.inkMuted, letterSpacing: "0.25em" }}
+        >
+          Milestone reached
+        </div>
+        <h2
+          className="text-4xl mb-3"
+          style={{ fontFamily: fonts.display, fontWeight: 600, letterSpacing: "-0.02em" }}
+        >
+          You did it.
+        </h2>
+        <p
+          className="text-lg mb-1"
+          style={{ color: palette.inkSoft }}
+        >
+          For showing up for{" "}
+          <span style={{ fontFamily: fonts.display, fontStyle: "italic", color: palette.accent }}>
+            {goalName}
+          </span>:
+        </p>
+        <p
+          className="text-2xl mb-2"
+          style={{ fontFamily: fonts.display, fontWeight: 600 }}
+        >
+          {reward}
+        </p>
+        <p
+          className="text-xs mb-6 display-italic"
+          style={{ color: palette.inkMuted }}
+        >
+          Claim it now to lock it in. Unclaimed rewards can be lost on a reset.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2 justify-center">
+          <button
+            onClick={onClose}
+            className="px-5 py-3 rounded-full font-medium order-2 sm:order-1"
+            style={{
+              background: palette.surfaceDeep,
+              color: palette.inkSoft,
+            }}
+          >
+            Later
+          </button>
+          <button
+            onClick={onClaim}
+            className="px-7 py-3 rounded-full font-medium order-1 sm:order-2"
+            style={{ background: palette.ink, color: palette.bg }}
+          >
+            Claim now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+    /* ── Auth gate ─────────────────────────────────────────────────────── */
+    const LOGIN_PATH = "index.html";
+
+    function AuthGate() {
+      const [session, setSession] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [migrating, setMigrating] = useState(false);
+      const [migrationDone, setMigrationDone] = useState(false);
+
+      useEffect(() => {
+        supabaseClient.auth.getSession().then(({ data }) => {
+          if (!data.session) {
+            window.location.replace(LOGIN_PATH);
+            return;
+          }
+          setSession(data.session);
+          setAuthLoading(false);
+        });
+        const { data: sub } = supabaseClient.auth.onAuthStateChange((evt, s) => {
+          if (evt === "SIGNED_OUT" || !s) {
+            window.location.replace(LOGIN_PATH);
+            return;
+          }
+          setSession(s);
+        });
+        return () => sub.subscription.unsubscribe();
+      }, []);
+
+      // One-time migration of legacy localStorage data when first signing in
+      useEffect(() => {
+        if (!session || migrationDone) return;
+        const legacy = localStorage.getItem("goals-data");
+        const migratedFlag = localStorage.getItem(`goals-data-migrated:${session.user.id}`);
+        if (!legacy || migratedFlag) { setMigrationDone(true); return; }
+        (async () => {
+          setMigrating(true);
+          try {
+            const blob = JSON.parse(legacy);
+            const cloud = await fetchAllRows(session.user.id);
+            const cloudEmpty = cloud.habits.length === 0;
+            if (cloudEmpty && (blob.goals?.length || 0) > 0) {
+              await replaceAllRows(session.user.id, blob);
+            }
+            localStorage.setItem(`goals-data-migrated:${session.user.id}`, "1");
+            localStorage.setItem("goals-data-legacy-backup", legacy);
+            localStorage.removeItem("goals-data");
+          } catch (e) {
+            console.error("Migration failed:", e);
+            alert("Migration of local habits to cloud failed: " + (e.message || e));
+          } finally {
+            setMigrating(false);
+            setMigrationDone(true);
+          }
+        })();
+      }, [session, migrationDone]);
+
+      if (authLoading || !session) {
+        return (
+          <div
+            className="min-h-screen flex items-center justify-center"
+            style={{ background: "#F2EAD8", color: "#857664",
+                     fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", fontSize: 24 }}
+          >
+            opening your journal…
+          </div>
+        );
+      }
+
+      if (migrating) {
+        return (
+          <div
+            className="min-h-screen flex items-center justify-center px-6 text-center"
+            style={{ background: "#F2EAD8", color: "#1F1A14" }}
+          >
+            <div>
+              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600, fontSize: 32, marginBottom: 8 }}>
+                Moving your habits to the cloud…
+              </div>
+              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", color: "#857664" }}>
+                One moment. This only happens once.
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <>
+          <GoalTracker key={session.user.id} session={session} />
+          <SignOutButton email={session.user.email} />
+        </>
+      );
+    }
+
+    function SignOutButton({ email }) {
+      const [open, setOpen] = useState(false);
+      const signOut = async () => {
+        await supabaseClient.auth.signOut();
+        // Belt-and-suspenders: onAuthStateChange should also redirect, but be explicit
+        window.location.replace(LOGIN_PATH);
+      };
+      return (
+        <div
+          className="fixed top-3 right-3 z-40"
+          style={{ fontFamily: "'Manrope', system-ui, sans-serif" }}
+        >
+          {open ? (
+            <div
+              className="rounded-2xl px-4 py-3 flex items-center gap-3 text-sm shadow-lg"
+              style={{ background: "#FAF5E9", border: "1px solid #D9CDB5", color: "#1F1A14" }}
+            >
+              <div className="truncate max-w-[180px]" style={{ color: "#4A3F30" }}>
+                {email}
+              </div>
+              <button
+                onClick={signOut}
+                className="px-3 py-1 rounded-full text-xs"
+                style={{ background: "#A0432A", color: "#F2EAD8" }}
+              >
+                Sign out
+              </button>
+              <button
+                onClick={() => setOpen(false)}
+                className="text-xs"
+                style={{ color: "#857664" }}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setOpen(true)}
+              className="w-9 h-9 rounded-full flex items-center justify-center text-sm shadow-md"
+              style={{ background: "#FAF5E9", border: "1px solid #D9CDB5", color: "#4A3F30" }}
+              aria-label="Account"
+              title="Account"
+            >
+              {email ? email[0].toUpperCase() : "·"}
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    /* ── Mount ────────────────────────────────────────────────────────── */
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<AuthGate />);
+  </script>
+</body>
+</html>

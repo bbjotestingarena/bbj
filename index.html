@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="theme-color" content="#F2EAD8" />
+  <title>Sign in · your habits</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,500&family=Manrope:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: #F2EAD8;
+      color: #1F1A14;
+      font-family: 'Manrope', system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .card {
+      width: 100%;
+      max-width: 380px;
+      background: #FAF5E9;
+      border: 1px solid #D9CDB5;
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: 0 12px 28px -18px rgba(31, 26, 20, 0.18);
+    }
+    .small-cap {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: #857664;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-family: 'Fraunces', Georgia, serif;
+      font-weight: 600;
+      font-size: 36px;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin: 0 0 24px;
+    }
+    h1 .accent {
+      color: #A0432A;
+      font-style: italic;
+      font-weight: 500;
+    }
+    label {
+      display: block;
+      margin-bottom: 16px;
+    }
+    label.last { margin-bottom: 20px; }
+    .lbl {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: #857664;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 12px 16px;
+      background: #F2EAD8;
+      border: 1px solid #E5DBC4;
+      color: #1F1A14;
+      font-family: inherit;
+      font-size: 16px;
+      border-radius: 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: #A0432A; }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #1F1A14;
+      color: #F2EAD8;
+      font-family: inherit;
+      font-weight: 500;
+      font-size: 15px;
+      border: none;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:active:not(:disabled) { transform: translateY(0); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .err {
+      background: rgba(160, 67, 42, 0.1);
+      color: #A0432A;
+      border: 1px solid rgba(160, 67, 42, 0.3);
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+    .footnote {
+      margin-top: 20px;
+      text-align: center;
+      font-family: 'Fraunces', Georgia, serif;
+      font-style: italic;
+      font-size: 12px;
+      color: #857664;
+    }
+    .loading {
+      text-align: center;
+      font-family: 'Fraunces', Georgia, serif;
+      font-style: italic;
+      color: #857664;
+      font-size: 18px;
+    }
+    .hide { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="loading" id="loading">opening your journal…</div>
+
+  <form class="card hide" id="login-form" autocomplete="on">
+    <div class="small-cap">Sign in</div>
+    <h1>your <span class="accent">habits</span>,<br />everywhere.</h1>
+
+    <div id="error" class="err hide"></div>
+
+    <label>
+      <div class="lbl">Email</div>
+      <input type="email" id="email" required autocomplete="email" />
+    </label>
+    <label class="last">
+      <div class="lbl">Password</div>
+      <input type="password" id="password" required autocomplete="current-password" />
+    </label>
+
+    <button type="submit" id="submit">Sign in</button>
+
+    <div class="footnote">Personal use. Account managed by your friendly admin.</div>
+  </form>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const SUPABASE_URL = "https://oubfzwqbcjainmeefqpb.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_jr6gAFb0h-7s922GWpYlHQ_eA1XKDgk";
+    const APP_PATH = "tracker.html";
+
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true },
+    });
+
+    const loadingEl = document.getElementById("loading");
+    const formEl = document.getElementById("login-form");
+    const errEl = document.getElementById("error");
+    const btn = document.getElementById("submit");
+
+    // If already signed in, skip the form and go straight to the app
+    supabaseClient.auth.getSession().then(({ data }) => {
+      if (data.session) {
+        window.location.replace(APP_PATH);
+      } else {
+        loadingEl.classList.add("hide");
+        formEl.classList.remove("hide");
+      }
+    });
+
+    formEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errEl.classList.add("hide");
+      btn.disabled = true;
+      btn.textContent = "Signing in…";
+
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+      if (error) {
+        errEl.textContent = error.message;
+        errEl.classList.remove("hide");
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+      } else {
+        window.location.replace(APP_PATH);
+      }
+    });
+  </script>
+</body>
+</html>
