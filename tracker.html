@@ -200,6 +200,21 @@
       return data.session?.user?.id || null;
     };
 
+    /* ── Sync status (global, listenable) ─────────────────────────────────
+       The HealthButton subscribes to window.__syncStatus__ to show real-time
+       state. Every storage.set updates lastOk on success or lastErr on fail. */
+    window.__syncStatus__ = {
+      lastOk: null,        // ISO string of last successful sync
+      lastErr: null,       // { time, message } of last error
+      inFlight: 0,         // number of writes currently in flight
+      subscribers: new Set(),
+    };
+    const notifySync = () => {
+      for (const fn of window.__syncStatus__.subscribers) {
+        try { fn(); } catch (e) {}
+      }
+    };
+
     window.storage = {
       async get(key) {
         if (key !== "goals-data") return null;
@@ -214,8 +229,22 @@
         const userId = await getCurrentUserId();
         if (!userId) throw new Error("Not signed in");
         const blob = JSON.parse(value);
-        await replaceAllRows(userId, blob);
-        // Local cache as backup so app doesn't refetch on every save
+        window.__syncStatus__.inFlight++;
+        notifySync();
+        try {
+          await replaceAllRows(userId, blob);
+          window.__syncStatus__.lastOk = new Date().toISOString();
+          window.__syncStatus__.lastErr = null;
+        } catch (err) {
+          window.__syncStatus__.lastErr = {
+            time: new Date().toISOString(),
+            message: err.message || String(err),
+          };
+          throw err;
+        } finally {
+          window.__syncStatus__.inFlight--;
+          notifySync();
+        }
         try { localStorage.setItem("goals-data-cache", value); } catch (e) {}
         return { key, value, shared: false };
       },
@@ -267,6 +296,9 @@
     const CalendarDays = makeIcon('<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>');
     const RotateCcw    = makeIcon('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>');
     const Settings2    = makeIcon('<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>');
+    const Activity     = makeIcon('<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.5.5 0 0 1-.96 0L9.24 2.18a.5.5 0 0 0-.96 0l-2.35 8.36A2 2 0 0 1 4 12H2"/>');
+    const RefreshCw    = makeIcon('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>');
+    const AlertCircle  = makeIcon('<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>');
 
     /* ── App code (unchanged from goal_tracker.jsx) ──────────────────────── */
 
@@ -3707,8 +3739,288 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
       return (
         <>
           <GoalTracker key={session.user.id} session={session} />
+          <HealthButton userId={session.user.id} />
           <SignOutButton email={session.user.email} />
         </>
+      );
+    }
+
+    function HealthButton({ userId }) {
+      const [open, setOpen] = useState(false);
+      const [loading, setLoading] = useState(false);
+      const [stats, setStats] = useState(null);
+      const [error, setError] = useState(null);
+      const [tick, setTick] = useState(0); // re-render trigger
+
+      // Subscribe to sync status changes
+      useEffect(() => {
+        const fn = () => setTick((t) => t + 1);
+        window.__syncStatus__.subscribers.add(fn);
+        // Also tick every second so "X seconds ago" updates while panel open
+        const interval = setInterval(() => setTick((t) => t + 1), 1000);
+        return () => {
+          window.__syncStatus__.subscribers.delete(fn);
+          clearInterval(interval);
+        };
+      }, []);
+
+      const refresh = async () => {
+        setLoading(true);
+        setError(null);
+        const t0 = performance.now();
+        try {
+          const [h, m, c, r] = await Promise.all([
+            supabaseClient.from("habits").select("id", { count: "exact", head: true }).eq("user_id", userId),
+            supabaseClient.from("milestones").select("id", { count: "exact", head: true }).eq("user_id", userId),
+            supabaseClient.from("check_ins").select("date", { count: "exact", head: true }).eq("user_id", userId),
+            supabaseClient.from("attempt_resets").select("id", { count: "exact", head: true }).eq("user_id", userId),
+          ]);
+          const errs = [h.error, m.error, c.error, r.error].filter(Boolean);
+          if (errs.length > 0) throw errs[0];
+          const latency = Math.round(performance.now() - t0);
+          setStats({
+            habits: h.count ?? 0,
+            milestones: m.count ?? 0,
+            checkIns: c.count ?? 0,
+            resets: r.count ?? 0,
+            latency,
+            checkedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          setError(e.message || String(e));
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Auto-fetch when panel opens
+      useEffect(() => {
+        if (open) refresh();
+      }, [open]);
+
+      // Auto-refresh every 30s while open
+      useEffect(() => {
+        if (!open) return;
+        const id = setInterval(refresh, 30000);
+        return () => clearInterval(id);
+      }, [open]);
+
+      const status = window.__syncStatus__;
+      const lastOk = status.lastOk;
+      const lastErr = status.lastErr;
+      const inFlight = status.inFlight;
+
+      const ago = (iso) => {
+        if (!iso) return "never";
+        const sec = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+        if (sec < 5) return "just now";
+        if (sec < 60) return `${sec}s ago`;
+        if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+        if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+        return `${Math.round(sec / 86400)}d ago`;
+      };
+
+      const overallState = (() => {
+        if (inFlight > 0) return { color: palette.amber, label: "syncing…" };
+        if (error || lastErr) return { color: palette.accent, label: "error" };
+        if (stats || lastOk) return { color: palette.forest, label: "healthy" };
+        return { color: palette.inkMuted, label: "idle" };
+      })();
+
+      return (
+        <>
+          <div className="fixed top-3 right-14 z-40">
+            <button
+              onClick={() => setOpen((v) => !v)}
+              className="w-9 h-9 rounded-full flex items-center justify-center shadow-md relative transition-transform hover:scale-105"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.inkSoft,
+              }}
+              aria-label="Database health"
+              title="Database health"
+            >
+              <Activity size={16} strokeWidth={2} />
+              <span
+                style={{
+                  position: "absolute",
+                  bottom: 1,
+                  right: 1,
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: overallState.color,
+                  border: `2px solid ${palette.surface}`,
+                }}
+              />
+            </button>
+          </div>
+
+          {open && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                style={{ background: "rgba(61, 38, 56, 0.35)" }}
+                onClick={() => setOpen(false)}
+              />
+              <div
+                className="fixed z-50 rounded-3xl shadow-xl"
+                style={{
+                  top: 56,
+                  right: 12,
+                  width: "min(380px, calc(100vw - 24px))",
+                  background: palette.surface,
+                  border: `1px solid ${palette.border}`,
+                  fontFamily: "'Manrope', system-ui, sans-serif",
+                  color: palette.ink,
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="px-5 pt-5 pb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div
+                      className="text-xs uppercase tracking-widest mb-1"
+                      style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                    >
+                      Database health
+                    </div>
+                    <div
+                      className="display text-2xl flex items-center gap-2"
+                      style={{ color: palette.ink, fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600 }}
+                    >
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: overallState.color,
+                        }}
+                      />
+                      {overallState.label}
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={refresh}
+                      disabled={loading}
+                      className="w-8 h-8 rounded-full flex items-center justify-center transition-colors disabled:opacity-50"
+                      style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+                      title="Refresh"
+                    >
+                      <RefreshCw size={14} strokeWidth={2} className={loading ? "animate-spin" : ""} />
+                    </button>
+                    <button
+                      onClick={() => setOpen(false)}
+                      className="w-8 h-8 rounded-full flex items-center justify-center"
+                      style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
+                      aria-label="Close"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+
+                <div className="px-5 pb-5">
+                  <div
+                    className="rounded-2xl p-4 mb-3"
+                    style={{ background: palette.bg, border: `1px solid ${palette.borderSoft}` }}
+                  >
+                    <div
+                      className="text-[10px] uppercase tracking-widest mb-2"
+                      style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                    >
+                      Last successful save
+                    </div>
+                    <div className="display text-xl" style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600 }}>
+                      {ago(lastOk)}
+                    </div>
+                    {inFlight > 0 && (
+                      <div className="text-xs mt-1" style={{ color: palette.amber, fontWeight: 500 }}>
+                        {inFlight} write{inFlight !== 1 ? "s" : ""} in flight
+                      </div>
+                    )}
+                  </div>
+
+                  {lastErr && (
+                    <div
+                      className="rounded-2xl p-4 mb-3 flex gap-2 text-sm"
+                      style={{
+                        background: "rgba(216, 95, 135, 0.08)",
+                        color: palette.accent,
+                        border: `1px solid ${palette.accent}33`,
+                      }}
+                    >
+                      <AlertCircle size={16} style={{ marginTop: 2, flexShrink: 0 }} />
+                      <div>
+                        <div style={{ fontWeight: 600 }}>Last sync error · {ago(lastErr.time)}</div>
+                        <div className="text-xs mt-0.5" style={{ color: palette.inkSoft }}>
+                          {lastErr.message}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div
+                    className="rounded-2xl overflow-hidden"
+                    style={{ background: palette.bg, border: `1px solid ${palette.borderSoft}` }}
+                  >
+                    <div
+                      className="px-4 py-2 text-[10px] uppercase tracking-widest flex items-center justify-between"
+                      style={{
+                        color: palette.inkMuted,
+                        letterSpacing: "0.2em",
+                        background: palette.surfaceDeep,
+                      }}
+                    >
+                      <span>Cloud row counts</span>
+                      {stats && <span>{stats.latency}ms · {ago(stats.checkedAt)}</span>}
+                    </div>
+                    {loading && !stats ? (
+                      <div className="p-4 text-sm display-italic" style={{ color: palette.inkMuted, fontFamily: "'Fraunces', Georgia, serif" }}>
+                        querying supabase…
+                      </div>
+                    ) : error ? (
+                      <div className="p-4 text-sm" style={{ color: palette.accent }}>
+                        Couldn't reach Supabase: {error}
+                      </div>
+                    ) : stats ? (
+                      <div className="divide-y" style={{ borderColor: palette.borderSoft }}>
+                        <CountRow label="habits" value={stats.habits} />
+                        <CountRow label="milestones" value={stats.milestones} />
+                        <CountRow label="check-ins" value={stats.checkIns} />
+                        <CountRow label="reset events" value={stats.resets} />
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div
+                    className="text-xs mt-3 display-italic"
+                    style={{ color: palette.inkMuted, fontFamily: "'Fraunces', Georgia, serif" }}
+                  >
+                    Every change saves to Supabase before the UI moves on. Auto-refreshing every 30s.
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } } .animate-spin { animation: spin 1s linear infinite; }`}</style>
+        </>
+      );
+    }
+
+    function CountRow({ label, value }) {
+      return (
+        <div
+          className="px-4 py-2.5 flex items-center justify-between"
+          style={{ borderTop: `1px solid ${palette.borderSoft}` }}
+        >
+          <span className="text-sm" style={{ color: palette.inkSoft }}>{label}</span>
+          <span className="ticker" style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600, fontSize: 18, color: palette.ink }}>
+            {value}
+          </span>
+        </div>
       );
     }
 
