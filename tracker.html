@@ -7,15 +7,22 @@
   <title>A small ledger of becoming</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    html, body { background: #FBEDF1; }
+    /* Theme defaults — these are immediately overridden by applyTheme() at script start */
+    :root {
+      --c-bg: #FBEDF1;
+      --c-surface: #FFF5F8;
+      --c-ink: #3D2638;
+      --f-display: 'Fraunces', Georgia, serif;
+      --f-body: 'Manrope', system-ui, sans-serif;
+    }
+    html, body { background: var(--c-bg); }
     body {
-      font-family: 'Manrope', system-ui, sans-serif;
+      font-family: var(--f-body);
+      color: var(--c-ink);
       -webkit-tap-highlight-color: transparent;
     }
-    /* Make the native date picker icon visible on the cream background */
     input[type="date"]::-webkit-calendar-picker-indicator {
       filter: invert(0.45) sepia(0.45) saturate(2) hue-rotate(335deg);
       cursor: pointer;
@@ -40,7 +47,7 @@
   </script>
 
   <script type="text/babel" data-presets="react">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     /* ── Storage shim: window.storage API backed by Supabase ─────────────
        Existing app code reads/writes one blob at key "goals-data".
@@ -61,6 +68,8 @@
           created_at: g.createdAt,
           attempt_start: g.attemptStart || g.createdAt,
           miss_rate_threshold: g.missRateThreshold ?? 0.30,
+          habit_type: g.habitType || "daily",
+          unit: g.unit || null,
         });
         for (const m of g.milestones || []) {
           milestones.push({
@@ -68,13 +77,19 @@
             habit_id: g.id,
             user_id: userId,
             day: m.day,
-            reward: m.reward,
+            reward: m.reward || "",
             claimed: !!m.claimed,
             claimed_at: m.claimedAt || null,
           });
         }
-        for (const d of g.checkIns || []) {
-          checkIns.push({ habit_id: g.id, user_id: userId, date: d });
+        // checkIns may be an array of strings (legacy) or objects with date+amount
+        // Look up amount from the goal's checkInAmounts map if present.
+        for (const c of g.checkIns || []) {
+          const dateStr = typeof c === "string" ? c : c.date;
+          const amount = (g.checkInAmounts && g.checkInAmounts[dateStr] != null)
+            ? Number(g.checkInAmounts[dateStr])
+            : (typeof c === "object" && c.amount != null ? Number(c.amount) : 1);
+          checkIns.push({ habit_id: g.id, user_id: userId, date: dateStr, amount });
         }
         for (const r of g.attemptResets || []) {
           resets.push({
@@ -103,8 +118,11 @@
           createdAt: h.created_at,
           attemptStart: h.attempt_start,
           missRateThreshold: Number(h.miss_rate_threshold),
+          habitType: h.habit_type || "daily",
+          unit: h.unit || null,
           milestones: [],
           checkIns: [],
+          checkInAmounts: {}, // date -> amount, for quantitative habits
           attemptResets: [],
         });
       }
@@ -114,7 +132,7 @@
         g.milestones.push({
           id: m.id,
           day: m.day,
-          reward: m.reward,
+          reward: m.reward || "",
           claimed: !!m.claimed,
           claimedAt: m.claimed_at,
         });
@@ -123,6 +141,7 @@
         const g = byHabit.get(c.habit_id);
         if (!g) continue;
         g.checkIns.push(c.date);
+        g.checkInAmounts[c.date] = Number(c.amount ?? 1);
       }
       for (const r of resets) {
         const g = byHabit.get(r.habit_id);
@@ -303,25 +322,128 @@
     /* ── App code (unchanged from goal_tracker.jsx) ──────────────────────── */
 
 
+/* ── Theme system ──────────────────────────────────────────────────────
+   palette and fonts return CSS-var references. The actual values come
+   from :root variables set by the active theme. Switch themes = swap
+   one stylesheet's worth of vars; every reference re-renders.        */
 const palette = {
-  bg: "#FBEDF1",
-  surface: "#FFF5F8",
-  surfaceDeep: "#F5DDE5",
-  ink: "#3D2638",
-  inkSoft: "#664756",
-  inkMuted: "#9B7989",
-  accent: "#D85F87",
-  accentSoft: "#E68DA8",
-  amber: "#ECCB6B",
-  forest: "#6FA17B",
-  border: "#E8C9D5",
-  borderSoft: "#F0DBE3",
+  bg: "var(--c-bg)",
+  surface: "var(--c-surface)",
+  surfaceDeep: "var(--c-surface-deep)",
+  ink: "var(--c-ink)",
+  inkSoft: "var(--c-ink-soft)",
+  inkMuted: "var(--c-ink-muted)",
+  accent: "var(--c-accent)",
+  accentSoft: "var(--c-accent-soft)",
+  amber: "var(--c-amber)",
+  forest: "var(--c-forest)",
+  border: "var(--c-border)",
+  borderSoft: "var(--c-border-soft)",
 };
 
 const fonts = {
-  display: "'Fraunces', Georgia, serif",
-  body: "'Manrope', system-ui, sans-serif",
+  display: "var(--f-display)",
+  body: "var(--f-body)",
 };
+
+const THEMES = {
+  soft: {
+    label: "Soft",
+    description: "Pastel pinks, serif accents",
+    fontImport: "https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap",
+    vars: {
+      "--c-bg": "#FBEDF1",
+      "--c-surface": "#FFF5F8",
+      "--c-surface-deep": "#F5DDE5",
+      "--c-ink": "#3D2638",
+      "--c-ink-soft": "#664756",
+      "--c-ink-muted": "#9B7989",
+      "--c-accent": "#D85F87",
+      "--c-accent-soft": "#E68DA8",
+      "--c-amber": "#ECCB6B",
+      "--c-forest": "#6FA17B",
+      "--c-border": "#E8C9D5",
+      "--c-border-soft": "#F0DBE3",
+      "--f-display": "'Fraunces', Georgia, serif",
+      "--f-body": "'Manrope', system-ui, sans-serif",
+    },
+    habitColors: ["#E07A9E","#A693D6","#F39A88","#7AB8DB","#7BC9A0","#E8C566","#D283C2","#F5A78A"],
+  },
+  sharp: {
+    label: "Sharp",
+    description: "Slate, teal, geometric sans",
+    fontImport: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+    vars: {
+      "--c-bg": "#EEF1F4",
+      "--c-surface": "#FFFFFF",
+      "--c-surface-deep": "#DCE2E8",
+      "--c-ink": "#0F1B26",
+      "--c-ink-soft": "#2C3E4F",
+      "--c-ink-muted": "#6B7B8A",
+      "--c-accent": "#0E6E7A",
+      "--c-accent-soft": "#3B8E99",
+      "--c-amber": "#C68E2C",
+      "--c-forest": "#3D7A4E",
+      "--c-border": "#C7D1DA",
+      "--c-border-soft": "#DCE2E8",
+      "--f-display": "'Inter', system-ui, sans-serif",
+      "--f-body": "'Inter', system-ui, sans-serif",
+    },
+    habitColors: ["#0E6E7A","#3D5A80","#A85A2B","#5A6B3D","#6B4858","#2D5F3F","#8A4F2A","#4A5F7A"],
+  },
+  plain: {
+    label: "Plain",
+    description: "Warm neutral, balanced",
+    fontImport: "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:wght@500;600&display=swap",
+    vars: {
+      "--c-bg": "#F5F1EA",
+      "--c-surface": "#FFFCF5",
+      "--c-surface-deep": "#E8E1D3",
+      "--c-ink": "#2A2620",
+      "--c-ink-soft": "#4F4940",
+      "--c-ink-muted": "#867E70",
+      "--c-accent": "#7A4E36",
+      "--c-accent-soft": "#9E6E54",
+      "--c-amber": "#C49A4A",
+      "--c-forest": "#5E7A52",
+      "--c-border": "#D5CCB9",
+      "--c-border-soft": "#E2D9C6",
+      "--f-display": "'Newsreader', Georgia, serif",
+      "--f-body": "'Manrope', system-ui, sans-serif",
+    },
+    habitColors: ["#7A4E36","#5E7A52","#4A6378","#8A6B3D","#6B4858","#3D6B6B","#A85A4A","#8A7A3D"],
+  },
+};
+
+const DEFAULT_THEME = "soft";
+
+const applyTheme = (themeKey) => {
+  const theme = THEMES[themeKey] || THEMES[DEFAULT_THEME];
+  const fontLinkId = `theme-font-${themeKey}`;
+  if (!document.getElementById(fontLinkId)) {
+    const link = document.createElement("link");
+    link.id = fontLinkId;
+    link.rel = "stylesheet";
+    link.href = theme.fontImport;
+    document.head.appendChild(link);
+  }
+  const root = document.documentElement;
+  root.setAttribute("data-theme", themeKey);
+  for (const [k, v] of Object.entries(theme.vars)) {
+    root.style.setProperty(k, v);
+  }
+  try { localStorage.setItem("theme", themeKey); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("themechange", { detail: themeKey }));
+};
+
+const getStoredTheme = () => {
+  try {
+    const t = localStorage.getItem("theme");
+    return THEMES[t] ? t : DEFAULT_THEME;
+  } catch (e) { return DEFAULT_THEME; }
+};
+
+applyTheme(getStoredTheme());
 
 const RESET_MIN_DAYS = 5;
 const RESET_MISS_RATE = 0.30;
@@ -455,27 +577,24 @@ const computeEffectiveProgress = (goal) => {
   const baseline = (goal.milestones || [])
     .filter((m) => m.claimed)
     .reduce((max, m) => Math.max(max, m.day), 0);
-  const attemptCheckIns = (goal.checkIns || []).filter(
-    (d) => d >= attemptStart
-  ).length;
+  const isQuant = goal.habitType === "quantitative";
+  const amounts = goal.checkInAmounts || {};
+  const attemptCheckIns = (goal.checkIns || [])
+    .filter((d) => d >= attemptStart)
+    .reduce((sum, d) => sum + (isQuant ? Number(amounts[d] ?? 1) : 1), 0);
   return baseline + attemptCheckIns;
 };
 
-const HABIT_COLORS = [
-  "#E07A9E",
-  "#A693D6",
-  "#F39A88",
-  "#7AB8DB",
-  "#7BC9A0",
-  "#E8C566",
-  "#D283C2",
-  "#F5A78A",
-];
+const getHabitColors = () => {
+  const t = getStoredTheme();
+  return THEMES[t]?.habitColors || THEMES.soft.habitColors;
+};
 
 const getHabitColor = (goalId, allGoals) => {
-  if (!allGoals || allGoals.length === 0) return HABIT_COLORS[0];
+  const colors = getHabitColors();
+  if (!allGoals || allGoals.length === 0) return colors[0];
   const idx = allGoals.findIndex((g) => g.id === goalId);
-  return HABIT_COLORS[(idx < 0 ? 0 : idx) % HABIT_COLORS.length];
+  return colors[(idx < 0 ? 0 : idx) % colors.length];
 };
 
 const addDays = (dateStr, n) => {
@@ -522,6 +641,7 @@ function GoalTracker() {
   const [selectedGoalId, setSelectedGoalId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [celebration, setCelebration] = useState(null);
+  const [quantityPrompt, setQuantityPrompt] = useState(null); // { goalId, dateStr, isToday }
 
   useEffect(() => {
     (async () => {
@@ -608,6 +728,10 @@ function GoalTracker() {
   const handleCheckIn = async (goalId) => {
     const goal = goals.find((g) => g.id === goalId);
     if (!goal || isCheckedInToday(goal)) return;
+    if (goal.habitType === "quantitative") {
+      setQuantityPrompt({ goalId, dateStr: todayStr(), isToday: true });
+      return;
+    }
     const newGoals = goals.map((g) =>
       g.id !== goalId ? g : { ...g, checkIns: [...(g.checkIns || []), todayStr()] }
     );
@@ -628,11 +752,17 @@ function GoalTracker() {
   };
 
   const handleUndoCheckIn = async (goalId) => {
-    const newGoals = goals.map((g) =>
-      g.id !== goalId
-        ? g
-        : { ...g, checkIns: (g.checkIns || []).filter((d) => d !== todayStr()) }
-    );
+    const today = todayStr();
+    const newGoals = goals.map((g) => {
+      if (g.id !== goalId) return g;
+      const newAmounts = { ...(g.checkInAmounts || {}) };
+      delete newAmounts[today];
+      return {
+        ...g,
+        checkIns: (g.checkIns || []).filter((d) => d !== today),
+        checkInAmounts: newAmounts,
+      };
+    });
     await saveGoals(newGoals);
   };
 
@@ -641,12 +771,21 @@ function GoalTracker() {
     if (!goal) return;
     const checkIns = goal.checkIns || [];
     const has = checkIns.includes(dateStr);
+    // Quantitative: tapping an unlogged day opens the modal; tapping a logged day removes it
+    if (goal.habitType === "quantitative" && !has) {
+      setQuantityPrompt({ goalId, dateStr, isToday: dateStr === todayStr() });
+      return;
+    }
     const newCheckIns = has
       ? checkIns.filter((d) => d !== dateStr)
       : [...checkIns, dateStr];
-    const newGoals = goals.map((g) =>
-      g.id !== goalId ? g : { ...g, checkIns: newCheckIns }
-    );
+    const newGoals = goals.map((g) => {
+      if (g.id !== goalId) return g;
+      const newAmounts = { ...(g.checkInAmounts || {}) };
+      if (has) delete newAmounts[dateStr];
+      else newAmounts[dateStr] = 1; // daily check-in always counts as 1
+      return { ...g, checkIns: newCheckIns, checkInAmounts: newAmounts };
+    });
     await saveGoals(newGoals);
 
     // Only celebrate if we ADDED a check-in and it just hit a milestone
@@ -664,6 +803,45 @@ function GoalTracker() {
           milestoneId: justHit.id,
         });
       }
+    }
+  };
+
+  // Called from the QuantityModal after user enters the amount
+  const handleQuantitySubmit = async (amount) => {
+    if (!quantityPrompt) return;
+    const { goalId, dateStr } = quantityPrompt;
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0) {
+      setQuantityPrompt(null);
+      return;
+    }
+    const newGoals = goals.map((g) => {
+      if (g.id !== goalId) return g;
+      const checkIns = g.checkIns || [];
+      const has = checkIns.includes(dateStr);
+      const newAmounts = { ...(g.checkInAmounts || {}) };
+      newAmounts[dateStr] = value;
+      return {
+        ...g,
+        checkIns: has ? checkIns : [...checkIns, dateStr],
+        checkInAmounts: newAmounts,
+      };
+    });
+    setQuantityPrompt(null);
+    await saveGoals(newGoals);
+    // Celebrate if we crossed a milestone
+    const updated = newGoals.find((g) => g.id === goalId);
+    const newProgress = computeEffectiveProgress(updated);
+    const justHit = (updated.milestones || []).find(
+      (m) => m.day <= newProgress && !m.claimed
+    );
+    if (justHit && newProgress >= justHit.day) {
+      setCelebration({
+        goalName: updated.name,
+        reward: justHit.reward,
+        goalId: updated.id,
+        milestoneId: justHit.id,
+      });
     }
   };
 
@@ -753,7 +931,6 @@ function GoalTracker() {
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Manrope:wght@300;400;500;600;700&display=swap');
         .grain::before {
           content: "";
           position: absolute;
@@ -764,10 +941,17 @@ function GoalTracker() {
           background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0.12 0 0 0 0 0.10 0 0 0 0 0.08 0 0 0 0.18 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
         }
         .ticker { font-variant-numeric: tabular-nums; }
-        .display-italic { font-family: ${fonts.display}; font-style: italic; font-weight: 500; }
-        .display { font-family: ${fonts.display}; font-weight: 600; letter-spacing: -0.02em; }
-        button { font-family: ${fonts.body}; }
-        input, textarea, select { font-family: ${fonts.body}; }
+        .display { font-family: var(--f-display); font-weight: 600; letter-spacing: -0.02em; }
+        .display-italic { font-family: var(--f-display); font-style: italic; font-weight: 500; }
+        /* In sharp/plain themes, italics on sans fonts look off — flatten to regular */
+        :root[data-theme="sharp"] .display-italic,
+        :root[data-theme="plain"] .display-italic {
+          font-style: normal;
+          font-weight: 500;
+          letter-spacing: 0;
+        }
+        button { font-family: var(--f-body); }
+        input, textarea, select { font-family: var(--f-body); }
         .fade-in { animation: fadeIn 0.4s ease-out both; }
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(8px); }
@@ -780,7 +964,7 @@ function GoalTracker() {
         }
       `}</style>
 
-      <div className="relative grain max-w-3xl mx-auto px-6 py-10 md:py-14">
+      <div className="relative grain max-w-3xl mx-auto px-6 pt-16 sm:pt-10 pb-10 md:py-14">
         {loading ? (
           <div
             className="text-center py-20 display-italic text-2xl"
@@ -864,6 +1048,20 @@ function GoalTracker() {
           onClose={() => setCelebration(null)}
         />
       )}
+
+      {quantityPrompt && (() => {
+        const g = goals.find((x) => x.id === quantityPrompt.goalId);
+        if (!g) return null;
+        return (
+          <QuantityModal
+            goal={g}
+            dateStr={quantityPrompt.dateStr}
+            isToday={quantityPrompt.isToday}
+            onSubmit={handleQuantitySubmit}
+            onClose={() => setQuantityPrompt(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -882,25 +1080,25 @@ function ListView({
 }) {
   return (
     <div className="fade-in">
-      <header className="mb-10 md:mb-14 flex items-end justify-between gap-3">
-        <div>
+      <header className="mb-6 md:mb-14 flex items-end justify-between gap-3">
+        <div className="min-w-0">
           <div
-            className="text-xs uppercase tracking-widest mb-2"
+            className="text-[10px] md:text-xs uppercase tracking-widest mb-1 md:mb-2 truncate"
             style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
           >
-            ⸻ A small ledger of becoming ⸻
+            <span className="hidden sm:inline">⸻ </span>A small ledger of becoming<span className="hidden sm:inline"> ⸻</span>
           </div>
           <h1
-            className="display text-5xl md:text-6xl leading-none"
+            className="display text-3xl sm:text-5xl md:text-6xl leading-none"
             style={{ color: palette.ink }}
           >
             your <span className="display-italic" style={{ color: palette.accent }}>habits</span>
           </h1>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
           <button
             onClick={onOpenRewards}
-            className="flex items-center gap-1.5 px-4 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            className="flex items-center gap-1.5 px-3 md:px-4 py-2.5 md:py-3 rounded-full transition-all hover:scale-105 active:scale-95"
             style={{
               background: palette.surface,
               color: palette.ink,
@@ -913,7 +1111,7 @@ function ListView({
           </button>
           <button
             onClick={onOpenCalendar}
-            className="flex items-center gap-1.5 px-4 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            className="flex items-center gap-1.5 px-3 md:px-4 py-2.5 md:py-3 rounded-full transition-all hover:scale-105 active:scale-95"
             style={{
               background: palette.surface,
               color: palette.ink,
@@ -926,7 +1124,7 @@ function ListView({
           </button>
           <button
             onClick={onCreate}
-            className="flex items-center gap-2 px-5 py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            className="flex items-center gap-1.5 md:gap-2 px-3 md:px-5 py-2.5 md:py-3 rounded-full transition-all hover:scale-105 active:scale-95"
             style={{
               background: palette.ink,
               color: palette.bg,
@@ -3258,6 +3456,9 @@ function CreateView({ onSave, onCancel }) {
   const [description, setDescription] = useState("");
   const [startDate, setStartDate] = useState(todayDefault);
   const [missRateThreshold, setMissRateThreshold] = useState(0.30);
+  const [habitType, setHabitType] = useState("daily"); // "daily" | "quantitative"
+  const [unit, setUnit] = useState("");
+  const [includeMilestones, setIncludeMilestones] = useState(false);
   const [milestones, setMilestones] = useState([
     { id: `m_${Date.now()}_1`, amount: 1, unit: "weeks", reward: "" },
   ]);
@@ -3270,7 +3471,7 @@ function CreateView({ onSave, onCancel }) {
       {
         id: `m_${Date.now()}_${Math.random()}`,
         amount: milestones.length + 1,
-        unit: "weeks",
+        unit: habitType === "quantitative" ? (unit || "items") : "weeks",
         reward: "",
       },
     ]);
@@ -3284,16 +3485,24 @@ function CreateView({ onSave, onCancel }) {
     setMilestones(milestones.filter((m) => m.id !== id));
   };
 
+  // Validation: name required; if quantitative, unit required;
+  // if including milestones, each must have a positive amount (reward optional)
   const canSave =
     name.trim().length > 0 &&
-    milestones.every((m) => m.amount > 0 && m.reward.trim().length > 0);
+    (habitType !== "quantitative" || unit.trim().length > 0) &&
+    (!includeMilestones || milestones.every((m) => m.amount > 0));
 
   const handleSave = () => {
     if (!canSave) return;
-    const finalMilestones = milestones
+    const finalMilestones = !includeMilestones ? [] : milestones
       .map((m) => ({
         id: m.id,
-        day: Math.round(m.amount * unitToDays[m.unit]),
+        // For daily habits: convert weeks/months to days.
+        // For quantitative: the milestone's "day" is the cumulative amount
+        // (e.g., 20 words = day 20 in the existing progress math).
+        day: habitType === "quantitative"
+          ? Math.round(m.amount)
+          : Math.round(m.amount * unitToDays[m.unit]),
         reward: m.reward.trim(),
         claimed: false,
         claimedAt: null,
@@ -3305,6 +3514,8 @@ function CreateView({ onSave, onCancel }) {
       description: description.trim(),
       startDate,
       missRateThreshold,
+      habitType,
+      unit: habitType === "quantitative" ? unit.trim() : null,
       milestones: finalMilestones,
     });
   };
@@ -3361,6 +3572,73 @@ function CreateView({ onSave, onCancel }) {
           />
         </Field>
 
+        <div>
+          <div
+            className="text-xs uppercase tracking-widest mb-2"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            What kind of habit?
+          </div>
+          <div
+            className="rounded-2xl p-1 inline-flex w-full"
+            style={{
+              background: palette.surfaceDeep,
+              border: `1px solid ${palette.border}`,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setHabitType("daily")}
+              className="flex-1 py-2.5 px-4 rounded-xl text-sm transition-all"
+              style={{
+                background: habitType === "daily" ? palette.surface : "transparent",
+                color: habitType === "daily" ? palette.ink : palette.inkSoft,
+                fontWeight: habitType === "daily" ? 600 : 500,
+                boxShadow: habitType === "daily" ? "0 1px 3px rgba(61,38,56,0.08)" : "none",
+              }}
+            >
+              Daily check-in
+            </button>
+            <button
+              type="button"
+              onClick={() => setHabitType("quantitative")}
+              className="flex-1 py-2.5 px-4 rounded-xl text-sm transition-all"
+              style={{
+                background: habitType === "quantitative" ? palette.surface : "transparent",
+                color: habitType === "quantitative" ? palette.ink : palette.inkSoft,
+                fontWeight: habitType === "quantitative" ? 600 : 500,
+                boxShadow: habitType === "quantitative" ? "0 1px 3px rgba(61,38,56,0.08)" : "none",
+              }}
+            >
+              Count toward a target
+            </button>
+          </div>
+          <div
+            className="text-xs mt-2 display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            {habitType === "daily"
+              ? "One tap per day says you showed up."
+              : "Log a number each time you do it. Progress accumulates."}
+          </div>
+        </div>
+
+        {habitType === "quantitative" && (
+          <Field label="What are you counting?">
+            <input
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              placeholder="words, km, pages, minutes…"
+              className="w-full px-5 py-4 rounded-2xl outline-none"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.ink,
+              }}
+            />
+          </Field>
+        )}
+
         <Field label="When are you starting?">
           <input
             type="date"
@@ -3408,7 +3686,7 @@ function CreateView({ onSave, onCancel }) {
         </div>
 
         <div>
-          <div className="flex items-end justify-between mb-3">
+          <div className="flex items-start justify-between gap-3 mb-3">
             <div>
               <div
                 className="text-xs uppercase tracking-widest mb-1"
@@ -3420,11 +3698,26 @@ function CreateView({ onSave, onCancel }) {
                 className="display-italic text-sm"
                 style={{ color: palette.inkSoft }}
               >
-                Mark the path with treats worth showing up for.
+                {includeMilestones
+                  ? "Reward field is optional — leave blank if it's just a checkpoint."
+                  : "Optional. Add nudges along the way, or leave blank and just track the habit."}
               </div>
             </div>
+            <button
+              type="button"
+              onClick={() => setIncludeMilestones(!includeMilestones)}
+              className="px-4 py-2 rounded-full text-sm whitespace-nowrap shrink-0"
+              style={{
+                background: includeMilestones ? palette.surfaceDeep : palette.ink,
+                color: includeMilestones ? palette.inkSoft : palette.bg,
+                fontWeight: 500,
+              }}
+            >
+              {includeMilestones ? "Skip" : "Add milestones"}
+            </button>
           </div>
 
+          {includeMilestones && (
           <div className="space-y-3">
             {milestones.map((m, i) => (
               <div
@@ -3474,28 +3767,39 @@ function CreateView({ onSave, onCancel }) {
                       color: palette.ink,
                     }}
                   />
-                  <select
-                    value={m.unit}
-                    onChange={(e) =>
-                      updateMilestone(m.id, { unit: e.target.value })
-                    }
-                    className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
-                    style={{
-                      background: palette.bg,
-                      border: `1px solid ${palette.borderSoft}`,
-                      color: palette.ink,
-                    }}
-                  >
-                    <option value="days">days</option>
-                    <option value="weeks">weeks</option>
-                    <option value="months">months</option>
-                  </select>
-                  <span
-                    className="col-span-4 text-sm text-center display-italic"
-                    style={{ color: palette.inkMuted }}
-                  >
-                    = {Math.round(m.amount * unitToDays[m.unit])} day{Math.round(m.amount * unitToDays[m.unit]) !== 1 ? "s" : ""}
-                  </span>
+                  {habitType === "quantitative" ? (
+                    <span
+                      className="col-span-7 text-sm text-left display-italic"
+                      style={{ color: palette.inkMuted }}
+                    >
+                      {unit.trim() || "items"} total
+                    </span>
+                  ) : (
+                    <>
+                      <select
+                        value={m.unit}
+                        onChange={(e) =>
+                          updateMilestone(m.id, { unit: e.target.value })
+                        }
+                        className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
+                        style={{
+                          background: palette.bg,
+                          border: `1px solid ${palette.borderSoft}`,
+                          color: palette.ink,
+                        }}
+                      >
+                        <option value="days">days</option>
+                        <option value="weeks">weeks</option>
+                        <option value="months">months</option>
+                      </select>
+                      <span
+                        className="col-span-4 text-sm text-center display-italic"
+                        style={{ color: palette.inkMuted }}
+                      >
+                        = {Math.round(m.amount * unitToDays[m.unit])} day{Math.round(m.amount * unitToDays[m.unit]) !== 1 ? "s" : ""}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div className="mt-3">
                   <input
@@ -3503,7 +3807,7 @@ function CreateView({ onSave, onCancel }) {
                     onChange={(e) =>
                       updateMilestone(m.id, { reward: e.target.value })
                     }
-                    placeholder="Reward — e.g. ice cream, dinner out, a hotel night"
+                    placeholder="Reward (optional) — leave blank for just a checkpoint"
                     className="w-full px-4 py-2.5 rounded-xl outline-none"
                     style={{
                       background: palette.bg,
@@ -3527,6 +3831,7 @@ function CreateView({ onSave, onCancel }) {
               <Plus size={16} /> Add another milestone
             </button>
           </div>
+          )}
         </div>
       </div>
 
@@ -3568,6 +3873,104 @@ function Field({ label, children }) {
       </div>
       {children}
     </label>
+  );
+}
+
+function QuantityModal({ goal, dateStr, isToday, onSubmit, onClose }) {
+  const [value, setValue] = useState("");
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, []);
+
+  const submit = (e) => {
+    if (e) e.preventDefault();
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return;
+    onSubmit(n);
+  };
+
+  const unit = goal.unit || "items";
+  const friendlyDate = isToday
+    ? "today"
+    : new Date(dateStr + "T00:00:00").toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-6"
+      style={{ background: "rgba(61, 38, 56, 0.55)" }}
+      onClick={onClose}
+    >
+      <form
+        onSubmit={submit}
+        className="rounded-3xl p-7 md:p-8 max-w-sm w-full pop"
+        style={{
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+          fontFamily: fonts.body,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="text-xs uppercase tracking-widest mb-2"
+          style={{ color: palette.inkMuted, letterSpacing: "0.25em" }}
+        >
+          {goal.name} · {friendlyDate}
+        </div>
+        <h2
+          className="text-3xl mb-5"
+          style={{ fontFamily: fonts.display, fontWeight: 600, letterSpacing: "-0.02em" }}
+        >
+          How many <span className="display-italic" style={{ color: palette.accent }}>{unit}</span>?
+        </h2>
+
+        <input
+          ref={inputRef}
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="any"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="0"
+          className="w-full px-5 py-4 rounded-2xl outline-none ticker text-3xl text-center mb-5"
+          style={{
+            background: palette.bg,
+            border: `1px solid ${palette.border}`,
+            color: palette.ink,
+            fontFamily: fonts.display,
+            fontWeight: 600,
+          }}
+        />
+
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-5 py-3 rounded-full font-medium"
+            style={{
+              background: palette.surfaceDeep,
+              color: palette.inkSoft,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!value || Number(value) <= 0}
+            className="px-7 py-3 rounded-full font-medium disabled:opacity-40"
+            style={{ background: palette.ink, color: palette.bg }}
+          >
+            Log it
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -3710,10 +4113,10 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
         return (
           <div
             className="min-h-screen flex items-center justify-center"
-            style={{ background: "#FBEDF1", color: "#9B7989",
-                     fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", fontSize: 24 }}
+            style={{ background: palette.bg, color: palette.inkMuted,
+                     fontFamily: fonts.display, fontSize: 24 }}
           >
-            opening your journal…
+            <span className="display-italic">opening your journal…</span>
           </div>
         );
       }
@@ -3722,13 +4125,13 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
         return (
           <div
             className="min-h-screen flex items-center justify-center px-6 text-center"
-            style={{ background: "#FBEDF1", color: "#3D2638" }}
+            style={{ background: palette.bg, color: palette.ink }}
           >
             <div>
-              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 600, fontSize: 32, marginBottom: 8 }}>
+              <div className="display" style={{ fontSize: 32, marginBottom: 8 }}>
                 Moving your habits to the cloud…
               </div>
-              <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontStyle: "italic", color: "#9B7989" }}>
+              <div className="display-italic" style={{ color: palette.inkMuted }}>
                 One moment. This only happens once.
               </div>
             </div>
@@ -4026,50 +4429,146 @@ function CelebrationModal({ goalName, reward, onClaim, onClose }) {
 
     function SignOutButton({ email }) {
       const [open, setOpen] = useState(false);
+      const [currentTheme, setCurrentTheme] = useState(getStoredTheme());
+      const menuRef = useRef(null);
+
+      // Close on outside click
+      useEffect(() => {
+        if (!open) return;
+        const onDown = (e) => {
+          if (menuRef.current && !menuRef.current.contains(e.target)) {
+            setOpen(false);
+          }
+        };
+        document.addEventListener("mousedown", onDown);
+        document.addEventListener("touchstart", onDown);
+        return () => {
+          document.removeEventListener("mousedown", onDown);
+          document.removeEventListener("touchstart", onDown);
+        };
+      }, [open]);
+
       const signOut = async () => {
         await supabaseClient.auth.signOut();
-        // Belt-and-suspenders: onAuthStateChange should also redirect, but be explicit
         window.location.replace(LOGIN_PATH);
       };
+
+      const pickTheme = (key) => {
+        applyTheme(key);
+        setCurrentTheme(key);
+        // Force a render of components that compute habit colors on mount
+        // (most read getStoredTheme on each render so they auto-update).
+      };
+
       return (
         <div
+          ref={menuRef}
           className="fixed top-3 right-3 z-40"
-          style={{ fontFamily: "'Manrope', system-ui, sans-serif" }}
+          style={{ fontFamily: "var(--f-body)" }}
         >
-          {open ? (
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="w-9 h-9 rounded-full flex items-center justify-center text-sm shadow-md transition-transform hover:scale-105"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.inkSoft,
+            }}
+            aria-label="Account & settings"
+            title="Account & settings"
+          >
+            {email ? email[0].toUpperCase() : "·"}
+          </button>
+
+          {open && (
             <div
-              className="rounded-2xl px-4 py-3 flex items-center gap-3 text-sm shadow-lg"
-              style={{ background: "#FFF5F8", border: "1px solid #E8C9D5", color: "#3D2638" }}
+              className="absolute right-0 top-12 rounded-2xl shadow-xl overflow-hidden"
+              style={{
+                width: 280,
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.ink,
+              }}
             >
-              <div className="truncate max-w-[180px]" style={{ color: "#664756" }}>
-                {email}
+              {/* Account section */}
+              <div className="px-4 pt-4 pb-3" style={{ borderBottom: `1px solid ${palette.borderSoft}` }}>
+                <div
+                  className="text-[10px] uppercase tracking-widest mb-1"
+                  style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                >
+                  Signed in
+                </div>
+                <div className="text-sm truncate" style={{ color: palette.inkSoft }}>
+                  {email}
+                </div>
               </div>
-              <button
-                onClick={signOut}
-                className="px-3 py-1 rounded-full text-xs"
-                style={{ background: "#D85F87", color: "#FFF5F8" }}
-              >
-                Sign out
-              </button>
-              <button
-                onClick={() => setOpen(false)}
-                className="text-xs"
-                style={{ color: "#9B7989" }}
-                aria-label="Close"
-              >
-                ✕
-              </button>
+
+              {/* Theme picker */}
+              <div className="px-4 py-3" style={{ borderBottom: `1px solid ${palette.borderSoft}` }}>
+                <div
+                  className="text-[10px] uppercase tracking-widest mb-2"
+                  style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                >
+                  Theme
+                </div>
+                <div className="space-y-1">
+                  {Object.entries(THEMES).map(([key, t]) => {
+                    const active = key === currentTheme;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => pickTheme(key)}
+                        className="w-full text-left px-3 py-2 rounded-xl flex items-center gap-3 transition-colors"
+                        style={{
+                          background: active ? palette.surfaceDeep : "transparent",
+                          color: palette.ink,
+                        }}
+                      >
+                        <div className="flex gap-1 shrink-0">
+                          {t.habitColors.slice(0, 3).map((c, i) => (
+                            <span
+                              key={i}
+                              style={{
+                                display: "inline-block",
+                                width: 10,
+                                height: 10,
+                                borderRadius: "50%",
+                                background: c,
+                              }}
+                            />
+                          ))}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm" style={{ fontWeight: active ? 600 : 500 }}>
+                            {t.label}
+                          </div>
+                          <div
+                            className="text-xs truncate"
+                            style={{ color: palette.inkMuted }}
+                          >
+                            {t.description}
+                          </div>
+                        </div>
+                        {active && (
+                          <Check size={14} strokeWidth={3} style={{ color: palette.accent, flexShrink: 0 }} />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Sign out */}
+              <div className="px-4 py-3">
+                <button
+                  onClick={signOut}
+                  className="w-full px-4 py-2 rounded-full text-sm font-medium"
+                  style={{ background: palette.accent, color: palette.surface }}
+                >
+                  Sign out
+                </button>
+              </div>
             </div>
-          ) : (
-            <button
-              onClick={() => setOpen(true)}
-              className="w-9 h-9 rounded-full flex items-center justify-center text-sm shadow-md"
-              style={{ background: "#FFF5F8", border: "1px solid #E8C9D5", color: "#664756" }}
-              aria-label="Account"
-              title="Account"
-            >
-              {email ? email[0].toUpperCase() : "·"}
-            </button>
           )}
         </div>
       );
