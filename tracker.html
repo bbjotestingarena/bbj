@@ -1375,28 +1375,28 @@ function DetailView({
     <div className="fade-in">
       <button
         onClick={onBack}
-        className="flex items-center gap-1 text-sm mb-8 hover:gap-2 transition-all"
+        className="flex items-center gap-1 text-sm mb-5 md:mb-8 hover:gap-2 transition-all"
         style={{ color: palette.inkSoft }}
       >
         <ChevronLeft size={16} /> all habits
       </button>
 
-      <header className="mb-10">
+      <header className="mb-6 md:mb-10">
         <div
-          className="text-xs uppercase tracking-widest mb-3"
+          className="text-[10px] md:text-xs uppercase tracking-widest mb-1.5 md:mb-3"
           style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
         >
           Habit · started {goal.createdAt}
         </div>
         <h1
-          className="display text-5xl md:text-6xl leading-tight mb-2"
+          className="display text-3xl sm:text-4xl md:text-6xl leading-tight mb-2"
           style={{ color: palette.ink }}
         >
           {goal.name}
         </h1>
         {goal.description && (
           <p
-            className="display-italic text-xl"
+            className="display-italic text-base md:text-xl"
             style={{ color: palette.inkSoft }}
           >
             {goal.description}
@@ -2189,7 +2189,7 @@ function RewardsView({ goals, onBack, onSelectGoal, onClaim }) {
         >
           What's waiting for you
         </div>
-        <h1 className="display text-5xl md:text-6xl leading-tight">
+        <h1 className="display text-3xl sm:text-4xl md:text-6xl leading-tight">
           all your <span className="display-italic" style={{ color: palette.accent }}>rewards</span>
         </h1>
       </header>
@@ -2481,7 +2481,7 @@ function CalendarPageView({ goals, onBack, onToggleDay }) {
         >
           What's on the page today
         </div>
-        <h1 className="display text-5xl md:text-6xl leading-tight">
+        <h1 className="display text-3xl sm:text-4xl md:text-6xl leading-tight">
           your <span className="display-italic" style={{ color: palette.accent }}>calendar</span>
         </h1>
       </header>
@@ -3531,7 +3531,7 @@ function CreateView({ onSave, onCancel }) {
       </button>
 
       <h1
-        className="display text-5xl md:text-6xl leading-tight mb-2"
+        className="display text-3xl sm:text-4xl md:text-6xl leading-tight mb-2"
       >
         a new <span className="display-italic" style={{ color: palette.accent }}>habit</span>
       </h1>
