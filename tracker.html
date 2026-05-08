@@ -619,6 +619,12 @@ const computeAttemptStats = (goal, today) => {
 };
 
 const computeReset = (goal, today) => {
+  // Quantitative habits track cumulative counts (e.g. words, km). The
+  // miss-rate reset rule is a daily-habit concept — applying it here
+  // would erase prior amounts whenever the user skipped a few days.
+  // For quantitative habits, never auto-reset; preserve all logged data.
+  if (goal.habitType === "quantitative") return null;
+
   // Replays the habit's entire timeline from createdAt to today, recomputing every
   // reset event as if the current check-ins and claim dates were always the truth.
   // This means adding a forgotten check-in (or removing a wrongly-marked one) flows
@@ -763,6 +769,10 @@ const getMilestoneEvents = (goals, today) => {
       }
     }
     const progress = computeEffectiveProgress(g);
+    // Projecting future milestones to calendar dates only makes sense for
+    // daily habits where 1 check-in = 1 day. For quantitative habits the
+    // m.day is a count (e.g., 20 words), not a number of days, so skip.
+    if (g.habitType === "quantitative") continue;
     for (const m of g.milestones || []) {
       if (m.claimed) continue;
       if (progress >= m.day) continue;
@@ -807,10 +817,26 @@ function GoalTracker() {
         if (result && result.value) {
           const data = JSON.parse(result.value);
           const loaded = data.goals || [];
+          // Heal: previous versions could fire miss-rate resets on quantitative
+          // habits, which silently moved attemptStart forward and hid prior
+          // logged amounts. Reset attemptStart back to createdAt and clear any
+          // stale reset events on quantitative habits.
+          const healed = loaded.map((g) => {
+            if (g.habitType !== "quantitative") return g;
+            const needsHeal =
+              (g.attemptStart && g.attemptStart !== g.createdAt) ||
+              (g.attemptResets && g.attemptResets.length > 0);
+            if (!needsHeal) return g;
+            return { ...g, attemptStart: g.createdAt, attemptResets: [] };
+          });
           const today = todayStrPure();
-          const evaluated = loaded.map((g) => computeReset(g, today) || g);
+          const evaluated = healed.map((g) => computeReset(g, today) || g);
           setGoals(evaluated);
-          if (evaluated.some((g, i) => g !== loaded[i])) {
+          // Persist healing if anything changed
+          const changed =
+            evaluated.some((g, i) => g !== loaded[i]) ||
+            healed.some((g, i) => g !== loaded[i]);
+          if (changed) {
             try {
               await window.storage.set(
                 "goals-data",
@@ -908,9 +934,17 @@ function GoalTracker() {
       setQuantityPrompt({ goalId, dateStr: todayStr(), isToday: true });
       return;
     }
-    const newGoals = goals.map((g) =>
-      g.id !== goalId ? g : { ...g, checkIns: [...(g.checkIns || []), todayStr()] }
-    );
+    const today = todayStr();
+    const newGoals = goals.map((g) => {
+      if (g.id !== goalId) return g;
+      const newAmounts = { ...(g.checkInAmounts || {}) };
+      newAmounts[today] = 1;
+      return {
+        ...g,
+        checkIns: [...(g.checkIns || []), today],
+        checkInAmounts: newAmounts,
+      };
+    });
     await saveGoals(newGoals);
     const updated = newGoals.find((g) => g.id === goalId);
     const newProgress = computeEffectiveProgress(updated);
@@ -2088,13 +2122,18 @@ function DetailView({
                             letterSpacing: "0.18em",
                           }}
                         >
-                          Day {m.day}
+                          {goal.habitType === "quantitative"
+                            ? `${m.day} ${goal.unit || "items"}`
+                            : `Day ${m.day}`}
                           {!reached && (
                             <span
                               className="ml-2 ticker"
                               style={{ color: palette.accent }}
                             >
-                              · {remaining} day{remaining !== 1 ? "s" : ""} left
+                              · {remaining}{" "}
+                              {goal.habitType === "quantitative"
+                                ? `${goal.unit || "items"} to go`
+                                : `day${remaining !== 1 ? "s" : ""} left`}
                             </span>
                           )}
                           {claimed && m.claimedAt && (
@@ -3690,6 +3729,9 @@ function MonthMode({ cursor, today, goals, msByDate, dateToStr, onJumpToDay }) {
 }
 
 function AttemptPanel({ goal, attemptStats, onUpdateThreshold }) {
+  // Reset rule doesn't apply to quantitative habits — hide entirely.
+  if (goal.habitType === "quantitative") return null;
+
   const { elapsedDays, completedDays, missedDays, missRate, attemptStart } = attemptStats;
   const threshold = goal.missRateThreshold ?? RESET_MISS_RATE;
 
@@ -5079,33 +5121,46 @@ function DayDetailModal({ goal, dateStr, isToday, existingAmount, onSubmit, onDe
 
             {target != null && (
               <div
-                className="text-center mb-5 text-sm"
-                style={{ color: targetReached ? palette.forest : palette.inkSoft }}
+                className="rounded-2xl px-4 py-3 mb-5 text-sm"
+                style={{
+                  background: palette.bg,
+                  border: `1px solid ${palette.borderSoft}`,
+                }}
               >
-                {targetReached ? (
-                  <>
-                    <span className="display-italic">Target reached.</span>{" "}
-                    <span className="ticker">
-                      {previewedProgress} of {target} {unit}.
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    After this:{" "}
-                    <span className="ticker" style={{ color: palette.ink, fontWeight: 600 }}>
-                      {previewedProgress}
-                    </span>{" "}
-                    of{" "}
-                    <span className="ticker" style={{ color: palette.ink, fontWeight: 600 }}>
-                      {target}
-                    </span>{" "}
-                    {unit} ·{" "}
-                    <span className="ticker" style={{ color: palette.accent, fontWeight: 600 }}>
-                      {remaining}
-                    </span>{" "}
-                    to go
-                  </>
-                )}
+                <div className="flex items-baseline justify-between mb-1">
+                  <span style={{ color: palette.inkMuted }}>Already this attempt</span>
+                  <span className="ticker" style={{ color: palette.inkSoft }}>
+                    {baseline + baseSum} {unit}
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between mb-1">
+                  <span style={{ color: palette.inkMuted }}>This entry</span>
+                  <span className="ticker" style={{ color: palette.inkSoft }}>
+                    {previewedAmount > 0 ? "+" : ""}{previewedAmount} {unit}
+                  </span>
+                </div>
+                <div
+                  className="flex items-baseline justify-between pt-2 mt-1"
+                  style={{ borderTop: `1px solid ${palette.borderSoft}` }}
+                >
+                  <span
+                    className="text-xs uppercase tracking-widest"
+                    style={{ color: palette.inkMuted, letterSpacing: "0.18em" }}
+                  >
+                    {targetReached ? "Target reached" : "To go"}
+                  </span>
+                  <span
+                    className="ticker text-base"
+                    style={{
+                      color: targetReached ? palette.forest : palette.accent,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {targetReached
+                      ? `${previewedProgress} / ${target} ✓`
+                      : `${remaining} ${unit}`}
+                  </span>
+                </div>
               </div>
             )}
           </>
