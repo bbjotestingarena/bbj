@@ -223,9 +223,9 @@
        The HealthButton subscribes to window.__syncStatus__ to show real-time
        state. Every storage.set updates lastOk on success or lastErr on fail. */
     window.__syncStatus__ = {
-      lastOk: null,        // ISO string of last successful sync
-      lastErr: null,       // { time, message } of last error
-      inFlight: 0,         // number of writes currently in flight
+      lastOk: null,
+      lastErr: null,
+      inFlight: 0,
       subscribers: new Set(),
     };
     const notifySync = () => {
@@ -234,26 +234,134 @@
       }
     };
 
+    /* ── Safety state ──────────────────────────────────────────────────────
+       Gates and tracking that prevent catastrophic writes (e.g. saving an
+       empty blob over a populated cloud, or saving before initial fetch
+       completes).                                                          */
+    window.__safety__ = {
+      initialLoadOk: false,        // becomes true only after a successful fetch
+      lastKnownGoalCount: null,    // last count seen via load or save
+      schemaOk: null,              // null=unchecked, true=ok, false=mismatch
+      schemaErrorMsg: null,
+    };
+
+    /* Verify the database has the columns the app expects. Runs once on
+       first load. If anything's missing, sets schemaOk=false and refuses
+       all subsequent saves (read-only mode).                             */
+    const verifySchema = async (userId) => {
+      try {
+        // Touch every required column with explicit names — fails loudly if absent
+        const { error: hErr } = await supabaseClient
+          .from("habits")
+          .select("id,user_id,name,description,created_at,attempt_start,miss_rate_threshold,habit_type,unit")
+          .eq("user_id", userId)
+          .limit(1);
+        if (hErr) throw new Error(`habits: ${hErr.message}`);
+        const { error: cErr } = await supabaseClient
+          .from("check_ins")
+          .select("habit_id,user_id,date,amount")
+          .eq("user_id", userId)
+          .limit(1);
+        if (cErr) throw new Error(`check_ins: ${cErr.message}`);
+        window.__safety__.schemaOk = true;
+        window.__safety__.schemaErrorMsg = null;
+        return true;
+      } catch (e) {
+        window.__safety__.schemaOk = false;
+        window.__safety__.schemaErrorMsg = e.message || String(e);
+        return false;
+      }
+    };
+
+    /* Stash a snapshot of cloud state to localStorage before any save.
+       Keeps the last 3 snapshots so accidental wipes are recoverable.   */
+    const snapshotToLocal = (userId, blob) => {
+      try {
+        const key = `goals-snapshot:${userId}`;
+        const existing = JSON.parse(localStorage.getItem(key) || "[]");
+        existing.unshift({ at: new Date().toISOString(), blob });
+        const trimmed = existing.slice(0, 3);
+        localStorage.setItem(key, JSON.stringify(trimmed));
+      } catch (e) { /* localStorage might be full — non-fatal */ }
+    };
+
     window.storage = {
       async get(key) {
         if (key !== "goals-data") return null;
         const userId = await getCurrentUserId();
         if (!userId) return null;
+
+        // First load: verify schema before trusting anything
+        if (window.__safety__.schemaOk === null) {
+          await verifySchema(userId);
+        }
+        if (window.__safety__.schemaOk === false) {
+          throw new Error(
+            `Database schema is out of date. Migration not run? ` +
+            `Details: ${window.__safety__.schemaErrorMsg}`
+          );
+        }
+
         const rows = await fetchAllRows(userId);
         const blob = rowsToBlob(rows);
+        // Mark initial load complete and remember the count
+        window.__safety__.initialLoadOk = true;
+        window.__safety__.lastKnownGoalCount = (blob.goals || []).length;
+        // Stash a fresh snapshot so we have a known-good baseline
+        snapshotToLocal(userId, blob);
         return { key, value: JSON.stringify(blob), shared: false };
       },
-      async set(key, value) {
+
+      async set(key, value, options = {}) {
         if (key !== "goals-data") return null;
         const userId = await getCurrentUserId();
         if (!userId) throw new Error("Not signed in");
+
+        // Guard 1: refuse if schema isn't verified
+        if (window.__safety__.schemaOk !== true) {
+          throw new Error(
+            "Refusing to save: database schema check has not passed. " +
+            "Reload the page and check for migration errors."
+          );
+        }
+
+        // Guard 2: refuse if initial load never completed
+        if (!window.__safety__.initialLoadOk) {
+          throw new Error(
+            "Refusing to save: initial cloud load has not completed yet. " +
+            "Reload the page."
+          );
+        }
+
         const blob = JSON.parse(value);
+        const newCount = (blob.goals || []).length;
+        const prevCount = window.__safety__.lastKnownGoalCount;
+
+        // Guard 3: refuse to wipe everything in one save unless explicitly OK'd
+        if (newCount === 0 && prevCount > 0 && !options.allowWipe) {
+          throw new Error(
+            `Refusing to save 0 habits when ${prevCount} existed. ` +
+            `If this is intentional, use the explicit clear-all action.`
+          );
+        }
+        // Guard 4: refuse a >50% drop in habit count without confirmation
+        if (prevCount > 1 && newCount < prevCount / 2 && !options.allowDrop) {
+          throw new Error(
+            `Refusing to save: habit count dropping from ${prevCount} to ${newCount}. ` +
+            `Suspicious. If intentional, pass options.allowDrop = true.`
+          );
+        }
+
+        // Snapshot BEFORE write so we can recover if something goes wrong
+        snapshotToLocal(userId, blob);
+
         window.__syncStatus__.inFlight++;
         notifySync();
         try {
           await replaceAllRows(userId, blob);
           window.__syncStatus__.lastOk = new Date().toISOString();
           window.__syncStatus__.lastErr = null;
+          window.__safety__.lastKnownGoalCount = newCount;
         } catch (err) {
           window.__syncStatus__.lastErr = {
             time: new Date().toISOString(),
@@ -267,17 +375,52 @@
         try { localStorage.setItem("goals-data-cache", value); } catch (e) {}
         return { key, value, shared: false };
       },
+
       async delete(key) {
         if (key !== "goals-data") return null;
         const userId = await getCurrentUserId();
         if (!userId) return null;
+        // Explicit delete bypasses guards via allowWipe flag
         await replaceAllRows(userId, { goals: [] });
         try { localStorage.removeItem("goals-data-cache"); } catch (e) {}
         return { key, deleted: true, shared: false };
       },
+
       async list() {
         return { keys: ["goals-data"], prefix: "", shared: false };
       },
+    };
+
+    /* ── Recovery helper ──────────────────────────────────────────────────
+       If something does go wrong, you can run window.recoverFromSnapshot()
+       in the browser console to restore from the most recent local backup.
+       Returns { snapshots, restore(idx) }.                                */
+    window.recoverFromSnapshot = async () => {
+      const userId = await getCurrentUserId();
+      if (!userId) { console.error("Not signed in"); return null; }
+      const key = `goals-snapshot:${userId}`;
+      const snapshots = JSON.parse(localStorage.getItem(key) || "[]");
+      if (snapshots.length === 0) {
+        console.log("No local snapshots available.");
+        return { snapshots: [], restore: () => null };
+      }
+      console.table(snapshots.map((s, i) => ({
+        index: i,
+        savedAt: s.at,
+        habits: (s.blob.goals || []).length,
+      })));
+      console.log("To restore, run: await window.recoverFromSnapshot().restore(0)");
+      return {
+        snapshots,
+        restore: async (idx = 0) => {
+          const target = snapshots[idx];
+          if (!target) { console.error("No snapshot at index", idx); return; }
+          await replaceAllRows(userId, target.blob);
+          window.__safety__.lastKnownGoalCount = (target.blob.goals || []).length;
+          console.log(`Restored ${(target.blob.goals || []).length} habits from ${target.at}`);
+          window.location.reload();
+        },
+      };
     };
 
     /* ── Inlined Lucide icons (matching lucide-react component API) ─────── */
@@ -642,6 +785,8 @@ function GoalTracker() {
   const [loading, setLoading] = useState(true);
   const [celebration, setCelebration] = useState(null);
   const [quantityPrompt, setQuantityPrompt] = useState(null); // { goalId, dateStr, isToday }
+  const [loadError, setLoadError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -653,7 +798,6 @@ function GoalTracker() {
           const today = todayStrPure();
           const evaluated = loaded.map((g) => computeReset(g, today) || g);
           setGoals(evaluated);
-          // If any reset triggered while we were away, persist it
           if (evaluated.some((g, i) => g !== loaded[i])) {
             try {
               await window.storage.set(
@@ -661,25 +805,45 @@ function GoalTracker() {
                 JSON.stringify({ goals: evaluated })
               );
             } catch (e) {
-              // ignore
+              setSaveError(e.message || String(e));
             }
           }
         }
       } catch (e) {
-        // First run — no data yet
+        // Distinguish "first run, no data" from real errors. Schema errors and
+        // network errors must NOT be silently swallowed — they led to data loss
+        // before. Surface them.
+        const msg = e.message || String(e);
+        if (msg.includes("schema is out of date") ||
+            msg.includes("does not exist") ||
+            msg.includes("PGRST")) {
+          setLoadError(msg);
+        }
+        // Other errors (e.g. genuinely no rows) fall through to empty state
       }
       setLoading(false);
     })();
   }, []);
 
-  const saveGoals = async (newGoals) => {
+  const saveGoals = async (newGoals, intent = "normal") => {
     const today = todayStrPure();
     const evaluated = newGoals.map((g) => computeReset(g, today) || g);
     setGoals(evaluated);
     try {
-      await window.storage.set("goals-data", JSON.stringify({ goals: evaluated }));
+      // intent === "delete" means the user explicitly removed habits;
+      // bypass the empty/large-drop guards which exist to catch accidental wipes
+      const options = intent === "delete"
+        ? { allowWipe: true, allowDrop: true }
+        : {};
+      await window.storage.set(
+        "goals-data",
+        JSON.stringify({ goals: evaluated }),
+        options
+      );
+      setSaveError(null);
     } catch (e) {
       console.error("Save failed", e);
+      setSaveError(e.message || String(e));
     }
   };
 
@@ -914,7 +1078,7 @@ function GoalTracker() {
   };
 
   const handleDeleteGoal = async (goalId) => {
-    await saveGoals(goals.filter((g) => g.id !== goalId));
+    await saveGoals(goals.filter((g) => g.id !== goalId), "delete");
     setView("list");
     setSelectedGoalId(null);
   };
@@ -965,7 +1129,44 @@ function GoalTracker() {
       `}</style>
 
       <div className="relative grain max-w-3xl mx-auto px-6 pt-16 sm:pt-10 pb-10 md:py-14">
-        {loading ? (
+        {loadError ? (
+          <div
+            className="rounded-3xl p-6 md:p-8 my-12"
+            style={{
+              background: palette.surface,
+              border: `2px solid ${palette.accent}`,
+              color: palette.ink,
+            }}
+          >
+            <div
+              className="text-xs uppercase tracking-widest mb-2"
+              style={{ color: palette.accent, letterSpacing: "0.2em" }}
+            >
+              ⚠ Can't load your habits safely
+            </div>
+            <h2 className="display text-2xl md:text-3xl mb-3">
+              The app is in <span className="display-italic">read-only mode</span>
+            </h2>
+            <p className="mb-3" style={{ color: palette.inkSoft }}>
+              Your habits are still in the cloud — but the app's code expects
+              database columns that aren't there yet. Saving has been disabled
+              to prevent data loss.
+            </p>
+            <p className="mb-3 text-sm" style={{ color: palette.inkMuted }}>
+              Most likely cause: a database migration hasn't been run.
+              Open Supabase → SQL Editor → run the latest migration, then reload this page.
+            </p>
+            <details className="text-xs mt-4" style={{ color: palette.inkMuted }}>
+              <summary className="cursor-pointer">Technical details</summary>
+              <pre
+                className="mt-2 p-3 rounded-xl whitespace-pre-wrap"
+                style={{ background: palette.bg, color: palette.inkSoft }}
+              >
+                {loadError}
+              </pre>
+            </details>
+          </div>
+        ) : loading ? (
           <div
             className="text-center py-20 display-italic text-2xl"
             style={{ color: palette.inkMuted }}
@@ -1062,6 +1263,39 @@ function GoalTracker() {
           />
         );
       })()}
+
+      {saveError && (
+        <div
+          className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:max-w-md rounded-2xl p-4 shadow-xl z-40"
+          style={{
+            background: palette.surface,
+            border: `2px solid ${palette.accent}`,
+            color: palette.ink,
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <div
+                className="text-xs uppercase tracking-widest mb-1"
+                style={{ color: palette.accent, letterSpacing: "0.2em" }}
+              >
+                ⚠ Last save was blocked
+              </div>
+              <div className="text-sm" style={{ color: palette.inkSoft }}>
+                {saveError}
+              </div>
+            </div>
+            <button
+              onClick={() => setSaveError(null)}
+              className="text-sm shrink-0"
+              style={{ color: palette.inkMuted }}
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1405,13 +1639,13 @@ function DetailView({
       </header>
 
       <div
-        className="rounded-3xl p-6 md:p-8 mb-8"
+        className="rounded-2xl md:rounded-3xl p-4 md:p-8 mb-5 md:mb-8"
         style={{
           background: palette.surface,
           border: `1px solid ${palette.border}`,
         }}
       >
-        <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4 md:mb-6">
           <Stat label="Days done" value={progress} />
           <Stat label="Current streak" value={streak} icon={<Flame size={12} />} />
           <Stat
@@ -1422,13 +1656,13 @@ function DetailView({
 
         {goal.createdAt > todayStrPure() ? (
           <div
-            className="rounded-2xl p-5 flex items-center gap-3"
+            className="rounded-2xl p-4 md:p-5 flex items-center gap-3"
             style={{ background: palette.surfaceDeep, color: palette.inkSoft }}
           >
             <CalendarDays size={24} strokeWidth={1.5} style={{ color: palette.accent }} />
             <div>
-              <div className="display text-lg">Starts on {goal.createdAt}</div>
-              <div className="text-sm display-italic">
+              <div className="display text-base md:text-lg">Starts on {goal.createdAt}</div>
+              <div className="text-xs md:text-sm display-italic">
                 Check-ins open on the start date.
               </div>
             </div>
@@ -1436,20 +1670,20 @@ function DetailView({
         ) : checkedToday ? (
           <div className="flex flex-col sm:flex-row gap-3">
             <div
-              className="flex-1 rounded-2xl p-5 flex items-center gap-3"
+              className="flex-1 rounded-2xl p-4 md:p-5 flex items-center gap-3"
               style={{ background: palette.forest, color: palette.surface }}
             >
-              <CheckCircle2 size={28} strokeWidth={2} />
+              <CheckCircle2 size={24} strokeWidth={2} />
               <div>
-                <div className="display text-xl">Today is done.</div>
-                <div className="text-sm opacity-80 display-italic">
+                <div className="display text-base md:text-xl">Today is done.</div>
+                <div className="text-xs md:text-sm opacity-80 display-italic">
                   Rest is also part of the practice.
                 </div>
               </div>
             </div>
             <button
               onClick={onUndoCheckIn}
-              className="px-5 py-3 rounded-2xl text-sm transition-colors"
+              className="px-4 md:px-5 py-2.5 md:py-3 rounded-2xl text-sm transition-colors"
               style={{
                 background: palette.surfaceDeep,
                 color: palette.inkSoft,
@@ -1461,14 +1695,14 @@ function DetailView({
         ) : (
           <button
             onClick={onCheckIn}
-            className="w-full rounded-2xl py-6 px-6 transition-all hover:scale-[1.01] active:scale-[0.99] flex items-center justify-center gap-3"
+            className="w-full rounded-2xl py-4 md:py-6 px-4 md:px-6 transition-all hover:scale-[1.01] active:scale-[0.99] flex items-center justify-center gap-2 md:gap-3"
             style={{
               background: palette.ink,
               color: palette.bg,
             }}
           >
-            <Circle size={24} strokeWidth={1.5} />
-            <span className="display text-2xl">Mark today complete</span>
+            <Circle size={20} strokeWidth={1.5} />
+            <span className="display text-lg md:text-2xl">Mark today complete</span>
           </button>
         )}
       </div>
@@ -3428,16 +3662,16 @@ function ResetHistory({ resets }) {
 function Stat({ label, value, icon }) {
   return (
     <div
-      className="rounded-2xl p-4"
+      className="rounded-xl md:rounded-2xl p-2.5 md:p-4"
       style={{ background: palette.surfaceDeep }}
     >
       <div
-        className="text-[10px] uppercase tracking-widest mb-1 flex items-center gap-1"
-        style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        className="text-[9px] md:text-[10px] uppercase tracking-widest mb-0.5 md:mb-1 flex items-center gap-1 leading-tight"
+        style={{ color: palette.inkMuted, letterSpacing: "0.18em" }}
       >
         {icon} {label}
       </div>
-      <div className="display text-3xl ticker" style={{ color: palette.ink }}>
+      <div className="display text-xl md:text-3xl ticker leading-none" style={{ color: palette.ink }}>
         {value}
       </div>
     </div>
