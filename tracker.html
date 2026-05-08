@@ -70,6 +70,7 @@
           miss_rate_threshold: g.missRateThreshold ?? 0.30,
           habit_type: g.habitType || "daily",
           unit: g.unit || null,
+          end_date: g.endDate || null,
         });
         for (const m of g.milestones || []) {
           milestones.push({
@@ -120,6 +121,7 @@
           missRateThreshold: Number(h.miss_rate_threshold),
           habitType: h.habit_type || "daily",
           unit: h.unit || null,
+          endDate: h.end_date || null,
           milestones: [],
           checkIns: [],
           checkInAmounts: {}, // date -> amount, for quantitative habits
@@ -253,7 +255,7 @@
         // Touch every required column with explicit names — fails loudly if absent
         const { error: hErr } = await supabaseClient
           .from("habits")
-          .select("id,user_id,name,description,created_at,attempt_start,miss_rate_threshold,habit_type,unit")
+          .select("id,user_id,name,description,created_at,attempt_start,miss_rate_threshold,habit_type,unit,end_date")
           .eq("user_id", userId)
           .limit(1);
         if (hErr) throw new Error(`habits: ${hErr.message}`);
@@ -458,6 +460,9 @@
     const CalendarDays = makeIcon('<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>');
     const RotateCcw    = makeIcon('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>');
     const Settings2    = makeIcon('<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>');
+    const Edit3        = makeIcon('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>');
+    const Minimize2    = makeIcon('<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>');
+    const Maximize2    = makeIcon('<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>');
     const Activity     = makeIcon('<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.5.5 0 0 1-.96 0L9.24 2.18a.5.5 0 0 0-.96 0l-2.35 8.36A2 2 0 0 1 4 12H2"/>');
     const RefreshCw    = makeIcon('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>');
     const AlertCircle  = makeIcon('<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>');
@@ -784,9 +789,16 @@ function GoalTracker() {
   const [selectedGoalId, setSelectedGoalId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [celebration, setCelebration] = useState(null);
-  const [quantityPrompt, setQuantityPrompt] = useState(null); // { goalId, dateStr, isToday }
+  const [quantityPrompt, setQuantityPrompt] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  const [viewMode, setViewModeState] = useState(() => {
+    try { return localStorage.getItem("viewMode") || "full"; } catch (e) { return "full"; }
+  });
+  const setViewMode = (m) => {
+    setViewModeState(m);
+    try { localStorage.setItem("viewMode", m); } catch (e) {}
+  };
 
   useEffect(() => {
     (async () => {
@@ -1083,6 +1095,58 @@ function GoalTracker() {
     setSelectedGoalId(null);
   };
 
+  const handleUpdateGoal = async (goalId, patch) => {
+    const newGoals = goals.map((g) => {
+      if (g.id !== goalId) return g;
+      const merged = { ...g, ...patch };
+      // If milestones were edited, preserve claimed flags by id
+      if (patch.milestones) {
+        const oldById = Object.fromEntries((g.milestones || []).map((m) => [m.id, m]));
+        merged.milestones = patch.milestones.map((m) => {
+          const old = oldById[m.id];
+          if (old && old.claimed) {
+            return { ...m, claimed: true, claimedAt: old.claimedAt };
+          }
+          return { ...m, claimed: false, claimedAt: null };
+        });
+      }
+      return merged;
+    });
+    await saveGoals(newGoals);
+    setView("detail");
+  };
+
+  // Tap-to-check from compact list. Daily: toggle today. Quantitative: opens
+  // the quantity modal for today (or undoes if already logged).
+  const handleQuickToggle = async (goalId) => {
+    const goal = goals.find((g) => g.id === goalId);
+    if (!goal) return;
+    const today = todayStr();
+    const checkedIn = (goal.checkIns || []).includes(today);
+    if (checkedIn) {
+      // Undo today's entry, regardless of habit type
+      const newGoals = goals.map((g) => {
+        if (g.id !== goalId) return g;
+        const newAmounts = { ...(g.checkInAmounts || {}) };
+        delete newAmounts[today];
+        return {
+          ...g,
+          checkIns: (g.checkIns || []).filter((d) => d !== today),
+          checkInAmounts: newAmounts,
+        };
+      });
+      await saveGoals(newGoals);
+      return;
+    }
+    // Not yet done today — for quantitative habits, open the modal; for
+    // daily, check in directly
+    if (goal.habitType === "quantitative") {
+      setQuantityPrompt({ goalId, dateStr: today, isToday: true });
+    } else {
+      await handleCheckIn(goalId);
+    }
+  };
+
   const selectedGoal = goals.find((g) => g.id === selectedGoalId);
 
   return (
@@ -1183,6 +1247,9 @@ function GoalTracker() {
             onCreate={() => setView("create")}
             onOpenCalendar={() => setView("calendar")}
             onOpenRewards={() => setView("rewards")}
+            onQuickToggle={handleQuickToggle}
+            viewMode={viewMode}
+            setViewMode={setViewMode}
             getProgress={getProgress}
             getStreak={getStreak}
             getNextMilestone={getNextMilestone}
@@ -1210,6 +1277,12 @@ function GoalTracker() {
             onSave={handleCreateGoal}
             onCancel={() => setView("list")}
           />
+        ) : view === "edit" && selectedGoal ? (
+          <EditView
+            goal={selectedGoal}
+            onSave={(patch) => handleUpdateGoal(selectedGoal.id, patch)}
+            onCancel={() => setView("detail")}
+          />
         ) : view === "detail" && selectedGoal ? (
           <DetailView
             goal={selectedGoal}
@@ -1218,6 +1291,7 @@ function GoalTracker() {
               setView("list");
               setSelectedGoalId(null);
             }}
+            onEdit={() => setView("edit")}
             onCheckIn={() => handleCheckIn(selectedGoal.id)}
             onUndoCheckIn={() => handleUndoCheckIn(selectedGoal.id)}
             onToggleDay={(dateStr) => handleToggleDay(selectedGoal.id, dateStr)}
@@ -1306,6 +1380,9 @@ function ListView({
   onCreate,
   onOpenCalendar,
   onOpenRewards,
+  onQuickToggle,
+  viewMode,
+  setViewMode,
   getProgress,
   getStreak,
   getNextMilestone,
@@ -1330,6 +1407,20 @@ function ListView({
           </h1>
         </div>
         <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
+          <button
+            onClick={() => setViewMode(viewMode === "full" ? "compact" : "full")}
+            className="flex items-center gap-1.5 px-2.5 md:px-3 py-2.5 md:py-3 rounded-full transition-all hover:scale-105 active:scale-95"
+            style={{
+              background: palette.surface,
+              color: palette.ink,
+              border: `1px solid ${palette.border}`,
+              fontWeight: 500,
+            }}
+            aria-label={viewMode === "full" ? "Switch to compact view" : "Switch to full cards"}
+            title={viewMode === "full" ? "Compact view" : "Full cards"}
+          >
+            {viewMode === "full" ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
           <button
             onClick={onOpenRewards}
             className="flex items-center gap-1.5 px-3 md:px-4 py-2.5 md:py-3 rounded-full transition-all hover:scale-105 active:scale-95"
@@ -1403,6 +1494,14 @@ function ListView({
             Start your first habit
           </button>
         </div>
+      ) : viewMode === "compact" ? (
+        <CompactList
+          goals={goals}
+          onSelect={onSelect}
+          onQuickToggle={onQuickToggle}
+          getStreak={getStreak}
+          isCheckedInToday={isCheckedInToday}
+        />
       ) : (
         <div className="space-y-4">
           {goals.map((goal) => (
@@ -1570,10 +1669,143 @@ function GoalCard({ goal, color, onClick, progress, streak, nextMilestone, ready
   );
 }
 
+/* ── CompactList ────────────────────────────────────────────────────────
+   Compact dashboard view. Each habit is one row: color dot, name, optional
+   streak/meta, and a check circle on the right. Tap the row to open the
+   detail page; tap the circle to mark today done (or open the quantity
+   modal for quantitative habits).                                       */
+function CompactList({ goals, onSelect, onQuickToggle, getStreak, isCheckedInToday }) {
+  const todayDoneCount = goals.filter((g) => isCheckedInToday(g)).length;
+  const totalToday = goals.filter((g) => {
+    // Habits whose start date is in the future shouldn't count toward "today's"
+    const start = g.attemptStart || g.createdAt;
+    const today = (() => {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    })();
+    return start <= today;
+  }).length;
+
+  return (
+    <div>
+      <div
+        className="display-italic text-sm md:text-base mb-3 px-1"
+        style={{ color: palette.inkSoft }}
+      >
+        <span className="ticker" style={{ color: palette.ink, fontWeight: 600 }}>
+          {todayDoneCount}
+        </span>{" "}
+        of{" "}
+        <span className="ticker" style={{ color: palette.ink, fontWeight: 600 }}>
+          {totalToday}
+        </span>{" "}
+        done today
+      </div>
+
+      <div className="space-y-1.5">
+        {goals.map((g) => {
+          const color = getHabitColor(g.id, goals);
+          const done = isCheckedInToday(g);
+          const streak = getStreak(g);
+          const start = g.attemptStart || g.createdAt;
+          const todayDate = (() => {
+            const d = new Date();
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, "0");
+            const day = String(d.getDate()).padStart(2, "0");
+            return `${y}-${m}-${day}`;
+          })();
+          const beforeStart = start > todayDate;
+
+          // Compose meta text — keep it short
+          const amounts = g.checkInAmounts || {};
+          const todayAmount = done ? Number(amounts[todayDate] || 1) : 0;
+          let meta = "";
+          let metaColor = palette.inkMuted;
+          if (beforeStart) {
+            meta = `starts ${start}`;
+          } else if (done && g.habitType === "quantitative" && todayAmount > 1) {
+            meta = `+${todayAmount} ${g.unit || "items"}`;
+            metaColor = palette.forest;
+          } else if (done && streak > 1) {
+            meta = `${streak}-day streak`;
+            metaColor = palette.forest;
+          } else if (!done && streak > 0) {
+            meta = `${streak}-day streak`;
+          }
+
+          return (
+            <div
+              key={g.id}
+              className="flex items-center gap-3 rounded-2xl pl-3 pr-2 py-2.5"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+              }}
+            >
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ background: color }}
+              />
+              <button
+                onClick={() => onSelect(g.id)}
+                className="flex-1 min-w-0 text-left"
+                style={{ background: "transparent" }}
+              >
+                <div className="flex items-baseline gap-2">
+                  <span
+                    className="display text-base truncate"
+                    style={{
+                      color: done ? palette.inkSoft : palette.ink,
+                      fontWeight: 600,
+                      textDecoration: done ? "line-through" : "none",
+                      textDecorationColor: palette.inkMuted,
+                    }}
+                  >
+                    {g.name}
+                  </span>
+                </div>
+                {meta && (
+                  <div className="text-xs leading-tight" style={{ color: metaColor }}>
+                    {meta}
+                  </div>
+                )}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!beforeStart) onQuickToggle(g.id);
+                }}
+                disabled={beforeStart}
+                className="shrink-0 w-9 h-9 rounded-full flex items-center justify-center transition-transform active:scale-90"
+                style={{
+                  background: done ? palette.forest : "transparent",
+                  border: done ? "none" : `1.5px solid ${palette.border}`,
+                  color: done ? palette.surface : "transparent",
+                  cursor: beforeStart ? "not-allowed" : "pointer",
+                  opacity: beforeStart ? 0.4 : 1,
+                }}
+                aria-label={done ? "Undo today" : "Mark today done"}
+                title={done ? "Undo today" : "Mark today done"}
+              >
+                {done && <Check size={16} strokeWidth={3} />}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DetailView({
   goal,
   allGoals,
   onBack,
+  onEdit,
   onCheckIn,
   onUndoCheckIn,
   onToggleDay,
@@ -1607,13 +1839,26 @@ function DetailView({
 
   return (
     <div className="fade-in">
-      <button
-        onClick={onBack}
-        className="flex items-center gap-1 text-sm mb-5 md:mb-8 hover:gap-2 transition-all"
-        style={{ color: palette.inkSoft }}
-      >
-        <ChevronLeft size={16} /> all habits
-      </button>
+      <div className="flex items-center justify-between mb-5 md:mb-8">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1 text-sm hover:gap-2 transition-all"
+          style={{ color: palette.inkSoft }}
+        >
+          <ChevronLeft size={16} /> all habits
+        </button>
+        <button
+          onClick={onEdit}
+          className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full transition-all"
+          style={{
+            background: palette.surface,
+            color: palette.inkSoft,
+            border: `1px solid ${palette.border}`,
+          }}
+        >
+          <Edit3 size={13} /> edit
+        </button>
+      </div>
 
       <header className="mb-6 md:mb-10">
         <div
@@ -1706,6 +1951,10 @@ function DetailView({
           </button>
         )}
       </div>
+
+      {goal.habitType === "quantitative" && goal.endDate && (
+        <DeadlineProgress goal={goal} progress={progress} />
+      )}
 
       <AttemptPanel
         goal={goal}
@@ -2066,6 +2315,137 @@ function DetailView({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/* DeadlineProgress — for quantitative habits with an end date.
+   Shows progress toward the largest milestone target (or just the count
+   if no milestones), days remaining, and pace status (on track / behind). */
+function DeadlineProgress({ goal, progress }) {
+  const target = (() => {
+    const ms = goal.milestones || [];
+    if (ms.length === 0) return null;
+    return Math.max(...ms.map((m) => m.day));
+  })();
+  const today = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  })();
+  const start = goal.attemptStart || goal.createdAt;
+  const end = goal.endDate;
+
+  // Day counts (calendar days inclusive of start)
+  const daysBetween = (a, b) => {
+    const ms = (new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000;
+    return Math.round(ms);
+  };
+  const totalDays = Math.max(1, daysBetween(start, end));
+  const daysElapsed = Math.max(0, Math.min(totalDays, daysBetween(start, today)));
+  const daysLeft = Math.max(0, daysBetween(today, end));
+  const pastDeadline = today > end;
+  const unit = goal.unit || "items";
+
+  // Pace logic: if you have a target, compute what fraction of the target
+  // you "should" have at this point in time, and compare to actual.
+  let paceLabel = null;
+  let paceColor = palette.inkMuted;
+  if (target) {
+    const expectedByNow = (target * daysElapsed) / totalDays;
+    const ratio = progress / Math.max(1, expectedByNow);
+    if (pastDeadline) {
+      paceLabel = progress >= target ? "Goal reached 🌸" : "Deadline passed";
+      paceColor = progress >= target ? palette.forest : palette.accent;
+    } else if (progress >= target) {
+      paceLabel = "Goal reached early 🌸";
+      paceColor = palette.forest;
+    } else if (ratio >= 0.95) {
+      paceLabel = "On track";
+      paceColor = palette.forest;
+    } else if (ratio >= 0.7) {
+      paceLabel = "Slightly behind";
+      paceColor = palette.amber;
+    } else {
+      paceLabel = "Behind pace";
+      paceColor = palette.accent;
+    }
+  }
+
+  const pct = target ? Math.min(100, Math.round((progress / target) * 100)) : 0;
+  const dailyNeeded = (target && !pastDeadline && daysLeft > 0 && progress < target)
+    ? Math.ceil((target - progress) / daysLeft)
+    : null;
+
+  return (
+    <div
+      className="rounded-2xl md:rounded-3xl p-4 md:p-6 mb-5 md:mb-8"
+      style={{
+        background: palette.surface,
+        border: `1px solid ${palette.border}`,
+      }}
+    >
+      <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
+        <div
+          className="text-xs uppercase tracking-widest"
+          style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+        >
+          Deadline · {goal.endDate}
+        </div>
+        {paceLabel && (
+          <div className="text-xs ticker" style={{ color: paceColor, fontWeight: 600 }}>
+            {paceLabel}
+          </div>
+        )}
+      </div>
+
+      {target ? (
+        <>
+          <div className="flex items-baseline gap-2 mb-2">
+            <span className="display text-2xl md:text-3xl ticker" style={{ color: palette.ink }}>
+              {progress}
+            </span>
+            <span className="display-italic text-sm" style={{ color: palette.inkMuted }}>
+              of {target} {unit}
+            </span>
+            <span className="ml-auto text-sm ticker" style={{ color: palette.inkSoft }}>
+              {pct}%
+            </span>
+          </div>
+          <div
+            className="h-2 rounded-full overflow-hidden mb-3"
+            style={{ background: palette.surfaceDeep }}
+          >
+            <div
+              className="h-full rounded-full transition-all"
+              style={{ background: paceColor, width: `${pct}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-xs" style={{ color: palette.inkMuted }}>
+            <span>
+              {pastDeadline
+                ? `${Math.abs(daysBetween(end, today))} day${Math.abs(daysBetween(end, today)) === 1 ? "" : "s"} past deadline`
+                : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`}
+            </span>
+            {dailyNeeded != null && (
+              <span className="display-italic">
+                {dailyNeeded} {unit}/day to finish
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="text-sm" style={{ color: palette.inkSoft }}>
+          {pastDeadline
+            ? `Deadline ${goal.endDate} has passed.`
+            : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left until ${goal.endDate}.`}
+          <div className="display-italic mt-1 text-xs" style={{ color: palette.inkMuted }}>
+            Add a milestone to set a target.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3689,8 +4069,9 @@ function CreateView({ onSave, onCancel }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [startDate, setStartDate] = useState(todayDefault);
+  const [endDate, setEndDate] = useState(""); // optional; for quantitative habits only
   const [missRateThreshold, setMissRateThreshold] = useState(0.30);
-  const [habitType, setHabitType] = useState("daily"); // "daily" | "quantitative"
+  const [habitType, setHabitType] = useState("daily");
   const [unit, setUnit] = useState("");
   const [includeMilestones, setIncludeMilestones] = useState(false);
   const [milestones, setMilestones] = useState([
@@ -3719,11 +4100,10 @@ function CreateView({ onSave, onCancel }) {
     setMilestones(milestones.filter((m) => m.id !== id));
   };
 
-  // Validation: name required; if quantitative, unit required;
-  // if including milestones, each must have a positive amount (reward optional)
   const canSave =
     name.trim().length > 0 &&
     (habitType !== "quantitative" || unit.trim().length > 0) &&
+    (!endDate || endDate >= startDate) &&
     (!includeMilestones || milestones.every((m) => m.amount > 0));
 
   const handleSave = () => {
@@ -3731,9 +4111,6 @@ function CreateView({ onSave, onCancel }) {
     const finalMilestones = !includeMilestones ? [] : milestones
       .map((m) => ({
         id: m.id,
-        // For daily habits: convert weeks/months to days.
-        // For quantitative: the milestone's "day" is the cumulative amount
-        // (e.g., 20 words = day 20 in the existing progress math).
         day: habitType === "quantitative"
           ? Math.round(m.amount)
           : Math.round(m.amount * unitToDays[m.unit]),
@@ -3747,6 +4124,7 @@ function CreateView({ onSave, onCancel }) {
       name: name.trim(),
       description: description.trim(),
       startDate,
+      endDate: habitType === "quantitative" && endDate ? endDate : null,
       missRateThreshold,
       habitType,
       unit: habitType === "quantitative" ? unit.trim() : null,
@@ -3870,6 +4248,41 @@ function CreateView({ onSave, onCancel }) {
                 color: palette.ink,
               }}
             />
+          </Field>
+        )}
+
+        {habitType === "quantitative" && (
+          <Field label="Deadline (optional)">
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full px-5 py-4 rounded-2xl outline-none text-lg ticker"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.ink,
+              }}
+            />
+            <div
+              className="text-xs mt-2 display-italic"
+              style={{ color: palette.inkMuted }}
+            >
+              {endDate
+                ? `Progress shows how you're tracking against this date. Leave blank for no deadline.`
+                : `Set a target date to see your daily pace, or leave blank for an open-ended goal.`}
+            </div>
+            {endDate && (
+              <button
+                type="button"
+                onClick={() => setEndDate("")}
+                className="text-xs mt-2 underline"
+                style={{ color: palette.inkSoft }}
+              >
+                clear deadline
+              </button>
+            )}
           </Field>
         )}
 
@@ -4090,6 +4503,410 @@ function CreateView({ onSave, onCancel }) {
           }}
         >
           Begin
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* EditView mirrors CreateView but pre-populates from an existing goal and
+   submits a partial patch via onSave. Habit type and start date are not
+   editable post-create — changing those would invalidate existing
+   check-ins and progress math. End date, name, description, threshold,
+   unit, and milestones are all editable.                                */
+function EditView({ goal, onSave, onCancel }) {
+  const [name, setName] = useState(goal.name || "");
+  const [description, setDescription] = useState(goal.description || "");
+  const [endDate, setEndDate] = useState(goal.endDate || "");
+  const [missRateThreshold, setMissRateThreshold] = useState(goal.missRateThreshold ?? 0.30);
+  const [unit, setUnit] = useState(goal.unit || "");
+  const isQuant = goal.habitType === "quantitative";
+
+  // Convert existing milestones (which store .day) back into editable form
+  const dayToFormUnit = (day, isQuantitative) => {
+    if (isQuantitative) return { amount: day, unit: "items" };
+    if (day % 30 === 0 && day >= 30) return { amount: day / 30, unit: "months" };
+    if (day % 7 === 0 && day >= 7) return { amount: day / 7, unit: "weeks" };
+    return { amount: day, unit: "days" };
+  };
+  const initialIncludeMs = (goal.milestones || []).length > 0;
+  const [includeMilestones, setIncludeMilestones] = useState(initialIncludeMs);
+  const [milestones, setMilestones] = useState(
+    (goal.milestones || []).length === 0
+      ? [{ id: `m_${Date.now()}_1`, amount: 1, unit: "weeks", reward: "" }]
+      : goal.milestones.map((m) => {
+          const { amount, unit: u } = dayToFormUnit(m.day, isQuant);
+          return { id: m.id, amount, unit: u, reward: m.reward || "" };
+        })
+  );
+
+  const unitToDays = { days: 1, weeks: 7, months: 30 };
+
+  const addMilestone = () => {
+    setMilestones([
+      ...milestones,
+      {
+        id: `m_${Date.now()}_${Math.random()}`,
+        amount: milestones.length + 1,
+        unit: isQuant ? (unit || "items") : "weeks",
+        reward: "",
+      },
+    ]);
+  };
+
+  const updateMilestone = (id, patch) => {
+    setMilestones(milestones.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  };
+
+  const removeMilestone = (id) => {
+    setMilestones(milestones.filter((m) => m.id !== id));
+  };
+
+  const startDate = goal.attemptStart || goal.createdAt;
+  const canSave =
+    name.trim().length > 0 &&
+    (!isQuant || unit.trim().length > 0) &&
+    (!endDate || endDate >= startDate) &&
+    (!includeMilestones || milestones.every((m) => m.amount > 0));
+
+  const handleSave = () => {
+    if (!canSave) return;
+    const finalMilestones = !includeMilestones ? [] : milestones
+      .map((m) => ({
+        id: m.id,
+        day: isQuant
+          ? Math.round(m.amount)
+          : Math.round(m.amount * unitToDays[m.unit]),
+        reward: m.reward.trim(),
+      }))
+      .sort((a, b) => a.day - b.day);
+
+    onSave({
+      name: name.trim(),
+      description: description.trim(),
+      endDate: isQuant && endDate ? endDate : null,
+      missRateThreshold,
+      unit: isQuant ? unit.trim() : null,
+      milestones: finalMilestones,
+    });
+  };
+
+  return (
+    <div className="fade-in">
+      <button
+        onClick={onCancel}
+        className="flex items-center gap-1 text-sm mb-5 md:mb-8 hover:gap-2 transition-all"
+        style={{ color: palette.inkSoft }}
+      >
+        <ChevronLeft size={16} /> back to habit
+      </button>
+
+      <h1
+        className="display text-3xl sm:text-4xl md:text-6xl leading-tight mb-2"
+      >
+        edit <span className="display-italic" style={{ color: palette.accent }}>habit</span>
+      </h1>
+      <p
+        className="display-italic text-base md:text-xl mb-8"
+        style={{ color: palette.inkSoft }}
+      >
+        Habit type and start date are locked once you've started — they affect existing progress.
+      </p>
+
+      <div className="space-y-6">
+        <Field label="What's the habit?">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Daily yoga, learn 20 words…"
+            className="w-full px-5 py-4 rounded-2xl outline-none text-lg"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.ink,
+            }}
+          />
+        </Field>
+
+        <Field label="A little more (optional)">
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="30 minutes every morning before coffee"
+            rows={2}
+            className="w-full px-5 py-4 rounded-2xl outline-none resize-none"
+            style={{
+              background: palette.surface,
+              border: `1px solid ${palette.border}`,
+              color: palette.ink,
+            }}
+          />
+        </Field>
+
+        {/* Habit type indicator (read-only) */}
+        <div>
+          <div
+            className="text-xs uppercase tracking-widest mb-2"
+            style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+          >
+            Habit type · locked
+          </div>
+          <div
+            className="rounded-2xl px-5 py-3 text-sm"
+            style={{
+              background: palette.surfaceDeep,
+              color: palette.inkSoft,
+            }}
+          >
+            {isQuant ? "Count toward a target" : "Daily check-in"}
+          </div>
+        </div>
+
+        {isQuant && (
+          <Field label="What are you counting?">
+            <input
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              placeholder="words, km, pages, minutes…"
+              className="w-full px-5 py-4 rounded-2xl outline-none"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.ink,
+              }}
+            />
+          </Field>
+        )}
+
+        {isQuant && (
+          <Field label="Deadline (optional)">
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full px-5 py-4 rounded-2xl outline-none text-lg ticker"
+              style={{
+                background: palette.surface,
+                border: `1px solid ${palette.border}`,
+                color: palette.ink,
+              }}
+            />
+            {endDate && (
+              <button
+                type="button"
+                onClick={() => setEndDate("")}
+                className="text-xs mt-2 underline"
+                style={{ color: palette.inkSoft }}
+              >
+                clear deadline
+              </button>
+            )}
+          </Field>
+        )}
+
+        {/* Threshold slider */}
+        <div>
+          <div className="flex items-end justify-between mb-2">
+            <div
+              className="text-xs uppercase tracking-widest"
+              style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+            >
+              Reset rule
+            </div>
+            <div className="text-sm ticker" style={{ color: palette.inkSoft }}>
+              {Math.round(missRateThreshold * 100)}% miss rate
+            </div>
+          </div>
+          <input
+            type="range"
+            min="0.10"
+            max="0.50"
+            step="0.05"
+            value={missRateThreshold}
+            onChange={(e) => setMissRateThreshold(parseFloat(e.target.value))}
+            className="w-full"
+          />
+          <div
+            className="text-xs mt-2 display-italic"
+            style={{ color: palette.inkMuted }}
+          >
+            Current attempt resets if you miss more than this fraction of days (after day 5).
+          </div>
+        </div>
+
+        {/* Milestones */}
+        <div>
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <div
+                className="text-xs uppercase tracking-widest mb-1"
+                style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+              >
+                Milestones & rewards
+              </div>
+              <div
+                className="display-italic text-sm"
+                style={{ color: palette.inkSoft }}
+              >
+                Editing these keeps your existing claimed rewards. Reward field is optional.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIncludeMilestones(!includeMilestones)}
+              className="px-4 py-2 rounded-full text-sm whitespace-nowrap shrink-0"
+              style={{
+                background: includeMilestones ? palette.surfaceDeep : palette.ink,
+                color: includeMilestones ? palette.inkSoft : palette.bg,
+                fontWeight: 500,
+              }}
+            >
+              {includeMilestones ? "Skip" : "Add milestones"}
+            </button>
+          </div>
+
+          {includeMilestones && (
+          <div className="space-y-3">
+            {milestones.map((m, i) => (
+              <div
+                key={m.id}
+                className="rounded-2xl p-4 md:p-5"
+                style={{
+                  background: palette.surface,
+                  border: `1px solid ${palette.border}`,
+                }}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div
+                    className="text-xs uppercase tracking-widest"
+                    style={{ color: palette.inkMuted, letterSpacing: "0.2em" }}
+                  >
+                    Milestone {i + 1}
+                  </div>
+                  {milestones.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeMilestone(m.id)}
+                      className="text-xs"
+                      style={{ color: palette.inkMuted }}
+                    >
+                      remove
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-12 gap-2 md:gap-3 items-center">
+                  <span
+                    className="col-span-2 text-sm text-right"
+                    style={{ color: palette.inkSoft }}
+                  >
+                    After
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={m.amount}
+                    onChange={(e) =>
+                      updateMilestone(m.id, {
+                        amount: parseInt(e.target.value) || 0,
+                      })
+                    }
+                    className="col-span-3 px-3 py-2.5 rounded-xl outline-none ticker"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  />
+                  {isQuant ? (
+                    <span
+                      className="col-span-7 text-sm text-left display-italic"
+                      style={{ color: palette.inkMuted }}
+                    >
+                      {unit.trim() || "items"} total
+                    </span>
+                  ) : (
+                    <>
+                      <select
+                        value={m.unit}
+                        onChange={(e) =>
+                          updateMilestone(m.id, { unit: e.target.value })
+                        }
+                        className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
+                        style={{
+                          background: palette.bg,
+                          border: `1px solid ${palette.borderSoft}`,
+                          color: palette.ink,
+                        }}
+                      >
+                        <option value="days">days</option>
+                        <option value="weeks">weeks</option>
+                        <option value="months">months</option>
+                      </select>
+                      <span
+                        className="col-span-4 text-sm text-center display-italic"
+                        style={{ color: palette.inkMuted }}
+                      >
+                        = {Math.round(m.amount * unitToDays[m.unit])} day{Math.round(m.amount * unitToDays[m.unit]) !== 1 ? "s" : ""}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="mt-3">
+                  <input
+                    value={m.reward}
+                    onChange={(e) =>
+                      updateMilestone(m.id, { reward: e.target.value })
+                    }
+                    placeholder="Reward (optional) — leave blank for just a checkpoint"
+                    className="w-full px-4 py-2.5 rounded-xl outline-none"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+            <button
+              onClick={addMilestone}
+              type="button"
+              className="w-full rounded-2xl py-4 flex items-center justify-center gap-2 transition-colors"
+              style={{
+                background: "transparent",
+                border: `1px dashed ${palette.border}`,
+                color: palette.inkSoft,
+              }}
+            >
+              <Plus size={16} /> Add another milestone
+            </button>
+          </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-3 mt-10">
+        <button
+          onClick={onCancel}
+          className="px-6 py-3 rounded-full"
+          style={{
+            background: palette.surfaceDeep,
+            color: palette.inkSoft,
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          className="flex-1 px-6 py-3 rounded-full transition-all disabled:opacity-40"
+          style={{
+            background: palette.ink,
+            color: palette.bg,
+          }}
+        >
+          Save changes
         </button>
       </div>
     </div>
