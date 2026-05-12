@@ -2024,10 +2024,6 @@ function DetailView({
         )}
       </div>
 
-      {goal.habitType === "quantitative" && goal.endDate && (
-        <DeadlineProgress goal={goal} progress={progress} />
-      )}
-
       <AttemptPanel
         goal={goal}
         attemptStats={attemptStats}
@@ -2035,6 +2031,8 @@ function DetailView({
       />
 
       <CalendarView goal={goal} allGoals={allGoals} onToggleDay={onToggleDay} />
+
+      <WeeklyMonthlyBreakdown goal={goal} />
 
       <section className="mb-10">
         <h2
@@ -2254,36 +2252,47 @@ function DetailView({
                   color: palette.ink,
                 }}
               />
-              <select
-                value={newMilestone.unit}
-                onChange={(e) =>
-                  setNewMilestone({ ...newMilestone, unit: e.target.value })
-                }
-                className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
-                style={{
-                  background: palette.bg,
-                  border: `1px solid ${palette.borderSoft}`,
-                  color: palette.ink,
-                }}
-              >
-                <option value="days">days</option>
-                <option value="weeks">weeks</option>
-                <option value="months">months</option>
-              </select>
-              <span
-                className="col-span-4 text-sm text-center display-italic"
-                style={{ color: palette.inkMuted }}
-              >
-                = {Math.round(newMilestone.amount * unitToDays[newMilestone.unit])} day
-                {Math.round(newMilestone.amount * unitToDays[newMilestone.unit]) !== 1 ? "s" : ""}
-              </span>
+              {goal.habitType === "quantitative" ? (
+                <span
+                  className="col-span-7 text-sm text-left display-italic"
+                  style={{ color: palette.inkMuted }}
+                >
+                  {(goal.unit || "items").trim()} total
+                </span>
+              ) : (
+                <>
+                  <select
+                    value={newMilestone.unit}
+                    onChange={(e) =>
+                      setNewMilestone({ ...newMilestone, unit: e.target.value })
+                    }
+                    className="col-span-3 px-3 py-2.5 rounded-xl outline-none"
+                    style={{
+                      background: palette.bg,
+                      border: `1px solid ${palette.borderSoft}`,
+                      color: palette.ink,
+                    }}
+                  >
+                    <option value="days">days</option>
+                    <option value="weeks">weeks</option>
+                    <option value="months">months</option>
+                  </select>
+                  <span
+                    className="col-span-4 text-sm text-center display-italic"
+                    style={{ color: palette.inkMuted }}
+                  >
+                    = {Math.round(newMilestone.amount * unitToDays[newMilestone.unit])} day
+                    {Math.round(newMilestone.amount * unitToDays[newMilestone.unit]) !== 1 ? "s" : ""}
+                  </span>
+                </>
+              )}
             </div>
             <input
               value={newMilestone.reward}
               onChange={(e) =>
                 setNewMilestone({ ...newMilestone, reward: e.target.value })
               }
-              placeholder="Reward — e.g. ice cream, dinner out, a hotel night"
+              placeholder="Reward (optional) — leave blank for just a checkpoint"
               className="w-full px-4 py-2.5 rounded-xl outline-none mb-3"
               style={{
                 background: palette.bg,
@@ -2307,14 +2316,13 @@ function DetailView({
               </button>
               <button
                 onClick={() => {
-                  if (
-                    !newMilestone.reward.trim() ||
-                    newMilestone.amount < 1
-                  )
-                    return;
-                  const day = Math.round(
-                    newMilestone.amount * unitToDays[newMilestone.unit]
-                  );
+                  if (newMilestone.amount < 1) return;
+                  // For quantitative habits, "After 20 [unit] total" means
+                  // the milestone day IS the count (20 = 20 words). For daily
+                  // habits, convert the units (weeks/months) into days.
+                  const day = goal.habitType === "quantitative"
+                    ? Math.round(newMilestone.amount)
+                    : Math.round(newMilestone.amount * unitToDays[newMilestone.unit]);
                   onAddMilestone({
                     id: `m_${Date.now()}_${Math.random()}`,
                     day,
@@ -2325,9 +2333,7 @@ function DetailView({
                   setNewMilestone({ amount: 1, unit: "weeks", reward: "" });
                   setAddingMilestone(false);
                 }}
-                disabled={
-                  !newMilestone.reward.trim() || newMilestone.amount < 1
-                }
+                disabled={newMilestone.amount < 1}
                 className="px-5 py-2 rounded-full text-sm font-medium transition-all disabled:opacity-40"
                 style={{
                   background: palette.ink,
@@ -2524,6 +2530,169 @@ function DeadlineProgress({ goal, progress }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* WeeklyMonthlyBreakdown — buckets check-ins by week or month and shows
+   how many [unit] (or days, for daily habits) were logged in each bucket.
+   Toggle between week and month. Shows the most recent 6 buckets that
+   have any data, with a small bar visualization.                        */
+function WeeklyMonthlyBreakdown({ goal }) {
+  const [grain, setGrain] = useState("week"); // "week" | "month"
+  const isQuant = goal.habitType === "quantitative";
+  const unit = isQuant ? (goal.unit || "items") : "days";
+  const amounts = goal.checkInAmounts || {};
+  const checkIns = goal.checkIns || [];
+
+  if (checkIns.length === 0) return null;
+
+  // Date helpers
+  const parseDate = (s) => new Date(s + "T00:00:00");
+  const formatDate = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+  const startOfWeek = (d) => {
+    const c = new Date(d);
+    c.setHours(0, 0, 0, 0);
+    c.setDate(c.getDate() - c.getDay()); // Sunday
+    return c;
+  };
+  const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+
+  // Bucket each check-in
+  const buckets = new Map(); // key: bucket-start ISO, value: { start, sum, days }
+  for (const dStr of checkIns) {
+    const d = parseDate(dStr);
+    const bucketStart = grain === "week" ? startOfWeek(d) : startOfMonth(d);
+    const key = formatDate(bucketStart);
+    if (!buckets.has(key)) {
+      buckets.set(key, { start: bucketStart, sum: 0, days: 0 });
+    }
+    const b = buckets.get(key);
+    b.sum += Number(amounts[dStr] ?? 1);
+    b.days += 1;
+  }
+
+  // Sort by date descending and take latest 6
+  const sorted = Array.from(buckets.values())
+    .sort((a, b) => b.start - a.start)
+    .slice(0, 6);
+
+  if (sorted.length === 0) return null;
+
+  // For bar widths
+  const maxValue = Math.max(...sorted.map((b) => (isQuant ? b.sum : b.days)));
+
+  const labelFor = (bucket) => {
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    if (grain === "week") {
+      const thisWeekStart = startOfWeek(now);
+      const diffDays = Math.round((thisWeekStart - bucket.start) / 86400000);
+      if (diffDays === 0) return "This week";
+      if (diffDays === 7) return "Last week";
+      const end = new Date(bucket.start);
+      end.setDate(end.getDate() + 6);
+      // e.g. "May 5 – 11"
+      const m = bucket.start.toLocaleString("en-US", { month: "short" });
+      const d1 = bucket.start.getDate();
+      const d2 = end.getDate();
+      return `${m} ${d1}–${d2}`;
+    } else {
+      const thisMonth = startOfMonth(now);
+      if (bucket.start.getTime() === thisMonth.getTime()) return "This month";
+      const lastMonth = new Date(thisMonth);
+      lastMonth.setMonth(lastMonth.getMonth() - 1);
+      if (bucket.start.getTime() === lastMonth.getTime()) return "Last month";
+      return bucket.start.toLocaleString("en-US", { month: "long", year: bucket.start.getFullYear() === now.getFullYear() ? undefined : "numeric" });
+    }
+  };
+
+  return (
+    <section className="mb-10">
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <h2 className="display text-xl md:text-2xl flex items-center gap-2">
+          <Activity size={18} style={{ color: palette.accent }} /> Trends
+        </h2>
+        <div
+          className="rounded-full p-0.5 flex shrink-0"
+          style={{ background: palette.surfaceDeep }}
+        >
+          <button
+            onClick={() => setGrain("week")}
+            className="px-3 py-1 rounded-full text-xs transition-all"
+            style={{
+              background: grain === "week" ? palette.surface : "transparent",
+              color: grain === "week" ? palette.ink : palette.inkSoft,
+              fontWeight: grain === "week" ? 600 : 500,
+              boxShadow: grain === "week" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+            }}
+          >
+            Week
+          </button>
+          <button
+            onClick={() => setGrain("month")}
+            className="px-3 py-1 rounded-full text-xs transition-all"
+            style={{
+              background: grain === "month" ? palette.surface : "transparent",
+              color: grain === "month" ? palette.ink : palette.inkSoft,
+              fontWeight: grain === "month" ? 600 : 500,
+              boxShadow: grain === "month" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+            }}
+          >
+            Month
+          </button>
+        </div>
+      </div>
+
+      <div
+        className="rounded-2xl md:rounded-3xl p-4 md:p-5"
+        style={{
+          background: palette.surface,
+          border: `1px solid ${palette.border}`,
+        }}
+      >
+        <div className="space-y-3">
+          {sorted.map((b) => {
+            const primary = isQuant ? b.sum : b.days;
+            const widthPct = maxValue > 0 ? Math.max(4, (primary / maxValue) * 100) : 0;
+            const habitColor = getHabitColor(goal.id, [goal]);
+            return (
+              <div key={formatDate(b.start)}>
+                <div className="flex items-baseline justify-between mb-1 gap-3">
+                  <span
+                    className="text-sm truncate"
+                    style={{ color: palette.inkSoft, fontWeight: 500 }}
+                  >
+                    {labelFor(b)}
+                  </span>
+                  <span className="ticker text-sm shrink-0" style={{ color: palette.ink, fontWeight: 600 }}>
+                    {primary} {unit}
+                    {isQuant && (
+                      <span className="display-italic ml-1.5" style={{ color: palette.inkMuted, fontWeight: 400, fontSize: "0.85em" }}>
+                        · {b.days} day{b.days !== 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div
+                  className="h-1.5 rounded-full overflow-hidden"
+                  style={{ background: palette.surfaceDeep }}
+                >
+                  <div
+                    className="h-full rounded-full"
+                    style={{ background: habitColor, width: `${widthPct}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -4331,41 +4500,6 @@ function CreateView({ onSave, onCancel }) {
           </Field>
         )}
 
-        {habitType === "quantitative" && (
-          <Field label="Deadline (optional)">
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full px-5 py-4 rounded-2xl outline-none text-lg ticker"
-              style={{
-                background: palette.surface,
-                border: `1px solid ${palette.border}`,
-                color: palette.ink,
-              }}
-            />
-            <div
-              className="text-xs mt-2 display-italic"
-              style={{ color: palette.inkMuted }}
-            >
-              {endDate
-                ? `Progress shows how you're tracking against this date. Leave blank for no deadline.`
-                : `Set a target date to see your daily pace, or leave blank for an open-ended goal.`}
-            </div>
-            {endDate && (
-              <button
-                type="button"
-                onClick={() => setEndDate("")}
-                className="text-xs mt-2 underline"
-                style={{ color: palette.inkSoft }}
-              >
-                clear deadline
-              </button>
-            )}
-          </Field>
-        )}
-
         <Field label="When are you starting?">
           <input
             type="date"
@@ -4755,33 +4889,6 @@ function EditView({ goal, onSave, onCancel }) {
                 color: palette.ink,
               }}
             />
-          </Field>
-        )}
-
-        {isQuant && (
-          <Field label="Deadline (optional)">
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full px-5 py-4 rounded-2xl outline-none text-lg ticker"
-              style={{
-                background: palette.surface,
-                border: `1px solid ${palette.border}`,
-                color: palette.ink,
-              }}
-            />
-            {endDate && (
-              <button
-                type="button"
-                onClick={() => setEndDate("")}
-                className="text-xs mt-2 underline"
-                style={{ color: palette.inkSoft }}
-              >
-                clear deadline
-              </button>
-            )}
           </Field>
         )}
 
